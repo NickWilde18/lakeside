@@ -128,6 +128,7 @@ func (s *Service) Query(ctx context.Context, req *QueryRequest) (*v1.AgentRespon
 	iter := s.runner.Query(ctx, req.Message,
 		adk.WithCheckPointID(checkpointID),
 		adk.WithSessionValues(g.Map{
+			// 这些 session values 会透传到 agent.Run/Resume，用于身份、会话和幂等控制。
 			"session_id":    sessionID,
 			"checkpoint_id": checkpointID,
 			"user_code":     strings.TrimSpace(req.UserCode),
@@ -161,6 +162,7 @@ func (s *Service) Resume(ctx context.Context, req *ResumeRequest) (*v1.AgentResp
 		if strings.TrimSpace(interruptID) == "" || target == nil {
 			continue
 		}
+		// confirmed 存在时表示“确认阶段恢复”，否则认为是“补信息阶段恢复”。
 		if target.Confirmed != nil {
 			targets[interruptID] = &ResumeConfirmData{
 				Confirmed:  *target.Confirmed,
@@ -194,6 +196,10 @@ func (s *Service) Resume(ctx context.Context, req *ResumeRequest) (*v1.AgentResp
 }
 
 func (s *Service) consumeIterator(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent], sessionID, checkpointID string) *v1.AgentResponse {
+	// consumeIterator 是 service 层与 ADK 事件流之间的适配层：
+	// 1. 中断事件 -> 转成 API 的 need_info/need_confirm 响应
+	// 2. 完成事件 -> 转成 API 的 done 响应
+	// 3. 错误事件 -> 转成 API 的 error 响应
 	resp := &v1.AgentResponse{SessionID: sessionID}
 	var lastMessage string
 	var exec *TicketExecutionResult
@@ -256,6 +262,7 @@ func parseInterrupts(ctxs []*adk.InterruptCtx) ([]v1.AgentInterrupt, string) {
 		if c == nil {
 			continue
 		}
+		// ADK interrupt 上挂的是业务自定义对象，这里统一还原为 API 层可序列化的结构。
 		info := castInterruptInfo(c.Info)
 		if info.Type == statusNeedConfirm {
 			status = statusNeedConfirm

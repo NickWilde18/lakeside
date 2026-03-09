@@ -49,7 +49,7 @@ func TestNormalizePriority(t *testing.T) {
 
 func TestNeedInfoInterruptUsesMissingFieldsAsPromptBase(t *testing.T) {
 	agent := NewTicketCreateAgent(nil, nil, nil, serviceConfig{EnumConfidenceThreshold: 0.75})
-	info, incomplete := agent.needInfoInterrupt(TicketDraft{
+	info, incomplete := agent.needInfoInterrupt("zh", TicketDraft{
 		UserCode:               "122020255",
 		Subject:                "寝室WiFi故障",
 		ServiceLevel:           "3",
@@ -69,5 +69,36 @@ func TestNeedInfoInterruptUsesMissingFieldsAsPromptBase(t *testing.T) {
 	}
 	if !strings.Contains(info.Prompt, "补充说明") {
 		t.Fatalf("prompt should preserve clarify text as supplement, got %q", info.Prompt)
+	}
+}
+
+func TestNeedInfoInterruptUsesEnglishPromptForEnglishUsers(t *testing.T) {
+	agent := NewTicketCreateAgent(nil, nil, nil, serviceConfig{EnumConfidenceThreshold: 0.75})
+	info, incomplete := agent.needInfoInterrupt("en", TicketDraft{
+		UserCode:               "122020255",
+		Subject:                "Dorm WiFi issue",
+		ServiceLevel:           "3",
+		ServiceLevelConfidence: 0.4,
+		Priority:               "3",
+		PriorityConfidence:     1,
+		OthersDesc:             "Connected but no internet",
+	}, "Please provide the building and room number.")
+	if !incomplete {
+		t.Fatalf("expected incomplete draft")
+	}
+	if !strings.Contains(info.Prompt, "service level") {
+		t.Fatalf("prompt should mention English missing field label, got %q", info.Prompt)
+	}
+	if !strings.Contains(info.Prompt, "Additional details") {
+		t.Fatalf("prompt should preserve clarify text in English, got %q", info.Prompt)
+	}
+}
+
+func TestDetectUserLanguage(t *testing.T) {
+	if got := detectUserLanguage("宿舍 WiFi 坏了"); got != "zh" {
+		t.Fatalf("detectUserLanguage chinese got %q", got)
+	}
+	if got := detectUserLanguage("Dorm WiFi is down"); got != "en" {
+		t.Fatalf("detectUserLanguage english got %q", got)
 	}
 }

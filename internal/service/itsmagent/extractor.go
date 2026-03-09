@@ -20,6 +20,8 @@ func NewExtractor() *Extractor {
 }
 
 func (e *Extractor) FillDraft(ctx context.Context, draft TicketDraft, userInput string) (TicketDraft, string, error) {
+	// FillDraft 只负责“尽量补齐草稿”，不会在这里决定是否可以进入下一阶段。
+	// 是否完整由 agent.go 中的 needInfoInterrupt 统一裁决。
 	res, err := e.Extract(ctx, userInput, draft)
 	if err != nil {
 		return draft, "", err
@@ -61,9 +63,10 @@ func (e *Extractor) FillDraft(ctx context.Context, draft TicketDraft, userInput 
 }
 
 func (e *Extractor) Extract(ctx context.Context, userInput string, current TicketDraft) (*ExtractResult, error) {
+	// Extract 与模型的唯一契约是“返回 JSON”，因此 system/user prompt 都强调只输出结构化结果。
 	prompt := buildExtractPrompt(current, userInput)
 	messages := []*schema.Message{
-		schema.SystemMessage(`You are an ITSM ticket field extractor. Return ONLY a JSON object. No markdown, no explanation.`),
+		schema.SystemMessage(`你是 ITSM 工单字段抽取助手。请根据用户输入和当前草稿补全工单字段。只返回 JSON 对象，不要输出解释，不要输出 Markdown。`),
 		schema.UserMessage(prompt),
 	}
 
@@ -88,15 +91,15 @@ func (e *Extractor) Extract(ctx context.Context, userInput string, current Ticke
 }
 
 func buildExtractPrompt(current TicketDraft, userInput string) string {
-	return fmt.Sprintf(`Task: Extract ITSM ticket fields from user input.
+	return fmt.Sprintf(`任务：根据用户输入抽取 ITSM 工单字段，并补全当前草稿。
 
-Current draft JSON:
+当前草稿 JSON：
 {"userCode":%q,"subject":%q,"serviceLevel":%q,"priority":%q,"othersDesc":%q}
 
-User input:
+用户输入：
 %q
 
-Output JSON schema exactly:
+请严格按以下 JSON 结构返回：
 {
   "subject": "string",
   "othersDesc": "string",
@@ -107,12 +110,18 @@ Output JSON schema exactly:
   "clarify_question": "string"
 }
 
-Rules:
-- subject/othersDesc should be concise and useful.
-- serviceLevel mapping: 1=highest,2=high,3=medium,4=low.
-- priority mapping: 1=consultation,2=service,3=incident,4=feedback.
-- If uncertain, keep field empty and provide clarify_question.
-- Output JSON only.`,
+规则：
+- 必须只返回 JSON 对象，不要输出解释，不要输出 Markdown。
+- subject 和 othersDesc 要简洁、可直接用于创建工单。
+- 即使没有单独字段，地点、故障现象、影响范围等关键信息也要尽量体现在 subject 和 othersDesc 中。
+- WiFi/网络故障类问题，完整信息优先覆盖：地点、故障现象、影响范围。
+- 如果缺地点，clarify_question 优先追问楼号和房间号。
+- 如果缺故障现象，clarify_question 优先追问是搜不到信号、连上没网、间歇断连，还是其他具体现象。
+- 如果缺影响范围，clarify_question 优先追问是单个设备、多台设备，还是整间宿舍/整个房间受影响。
+- serviceLevel 枚举映射：1=最高，2=高，3=中，4=低。
+- priority 枚举映射：1=咨询，2=服务，3=故障，4=反馈。
+- 如果不确定，不要猜测，保留空值，并提供具体的 clarify_question。
+- clarify_question、subject、othersDesc 应尽量使用与用户输入相同的语言。`,
 		current.UserCode,
 		current.Subject,
 		current.ServiceLevel,
@@ -123,6 +132,7 @@ Rules:
 }
 
 func findJSONObject(s string) (string, error) {
+	// 实际模型偶尔会包 markdown fence 或额外说明，这里做最小限度的容错提取。
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return "", fmt.Errorf("empty input")

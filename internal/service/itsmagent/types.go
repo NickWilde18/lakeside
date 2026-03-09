@@ -43,6 +43,7 @@ type TicketDraft struct {
 type TicketInterruptInfo struct {
 	Type           string      `json:"type"`
 	Prompt         string      `json:"prompt"`
+	Language       string      `json:"language,omitempty"`
 	MissingFields  []string    `json:"missing_fields,omitempty"`
 	EditableFields []string    `json:"editable_fields,omitempty"`
 	ReadonlyFields []string    `json:"readonly_fields,omitempty"`
@@ -50,9 +51,10 @@ type TicketInterruptInfo struct {
 }
 
 type TicketAgentState struct {
-	Stage   string              `json:"stage"`
-	Draft   TicketDraft         `json:"draft"`
-	Pending TicketInterruptInfo `json:"pending"`
+	Stage    string              `json:"stage"`
+	Language string              `json:"language,omitempty"`
+	Draft    TicketDraft         `json:"draft"`
+	Pending  TicketInterruptInfo `json:"pending"`
 }
 
 type ResumeCollectData struct {
