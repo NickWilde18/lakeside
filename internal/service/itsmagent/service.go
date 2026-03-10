@@ -18,6 +18,7 @@ import (
 )
 
 type Service struct {
+	agent           adk.Agent
 	runner          *adk.Runner
 	cfg             serviceConfig
 	checkpointStore checkpointStore
@@ -61,7 +62,11 @@ func newService(ctx context.Context) *Service {
 		CheckPointStore: checkpointStore,
 	})
 
-	return &Service{runner: runner, cfg: cfg, checkpointStore: checkpointStore}
+	return &Service{agent: agent, runner: runner, cfg: cfg, checkpointStore: checkpointStore}
+}
+
+func GetAgent(ctx context.Context) adk.Agent {
+	return GetService(ctx).agent
 }
 
 func initStores(ctx context.Context, cfg serviceConfig) (checkpointStore, idempotencyStore) {
@@ -129,9 +134,10 @@ func (s *Service) Query(ctx context.Context, req *QueryRequest) (*v1.AgentRespon
 		adk.WithCheckPointID(checkpointID),
 		adk.WithSessionValues(g.Map{
 			// 这些 session values 会透传到 agent.Run/Resume，用于身份、会话和幂等控制。
-			"session_id":    sessionID,
-			"checkpoint_id": checkpointID,
-			"user_code":     strings.TrimSpace(req.UserCode),
+			"session_id":        sessionID,
+			"checkpoint_id":     checkpointID,
+			"user_code":         strings.TrimSpace(req.UserCode),
+			"assistant_context": strings.TrimSpace(req.AssistantContext),
 		}),
 	)
 
@@ -182,9 +188,10 @@ func (s *Service) Resume(ctx context.Context, req *ResumeRequest) (*v1.AgentResp
 
 	iter, err := s.runner.ResumeWithParams(ctx, req.CheckpointID, &adk.ResumeParams{Targets: targets},
 		adk.WithSessionValues(g.Map{
-			"session_id":    sessionID,
-			"checkpoint_id": req.CheckpointID,
-			"user_code":     strings.TrimSpace(req.UserCode),
+			"session_id":        sessionID,
+			"checkpoint_id":     req.CheckpointID,
+			"user_code":         strings.TrimSpace(req.UserCode),
+			"assistant_context": strings.TrimSpace(req.AssistantContext),
 		}),
 	)
 	if err != nil {

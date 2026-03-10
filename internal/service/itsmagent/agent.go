@@ -55,6 +55,7 @@ func (a *TicketCreateAgent) Description(_ context.Context) string {
 }
 
 func (a *TicketCreateAgent) Run(ctx context.Context, input *adk.AgentInput, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	startedAt := time.Now()
 	// user_code 由 service 层在 Query/Resume 时写入 session values，这里直接读取即可。
 	userCode := strings.TrimSpace(sessionString(ctx, "user_code"))
 	if userCode == "" {
@@ -73,26 +74,31 @@ func (a *TicketCreateAgent) Run(ctx context.Context, input *adk.AgentInput, _ ..
 
 	var err error
 	var clarify string
+	assistantContext := sessionString(ctx, "assistant_context")
 	// 第一步先让 extractor 尝试从用户原话中补齐草稿。
-	draft, clarify, err = a.extractor.FillDraft(ctx, draft, message)
+	draft, clarify, err = a.extractor.FillDraft(ctx, draft, message, assistantContext)
 	if err != nil {
 		return singleEventIter(&adk.AgentEvent{Err: err})
 	}
+	a.debugLog(ctx, "itsm agent run extracted draft in %dms subject=%q serviceLevel=%q priority=%q", time.Since(startedAt).Milliseconds(), draft.Subject, draft.ServiceLevel, draft.Priority)
 
 	// 第二步由服务端规则决定当前草稿是否已经足够完整，而不是直接信任模型判断。
 	if info, incomplete := a.needInfoInterrupt(lang, draft, clarify); incomplete {
 		// 信息不全时中断，等待前端引导用户补充后再 Resume。
 		st := &TicketAgentState{Stage: stageCollect, Language: lang, Draft: draft, Pending: *info}
+		a.debugLog(ctx, "itsm agent run interrupted need_info in %dms", time.Since(startedAt).Milliseconds())
 		return singleEventIter(adk.StatefulInterrupt(ctx, info, st))
 	}
 
 	// 槽位齐全后先二次确认，避免直接提交导致误建单。
 	confirm := a.buildConfirmInterrupt(lang, draft)
 	st := &TicketAgentState{Stage: stageConfirm, Language: lang, Draft: draft, Pending: *confirm}
+	a.debugLog(ctx, "itsm agent run interrupted need_confirm in %dms", time.Since(startedAt).Milliseconds())
 	return singleEventIter(adk.StatefulInterrupt(ctx, confirm, st))
 }
 
 func (a *TicketCreateAgent) Resume(ctx context.Context, info *adk.ResumeInfo, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	startedAt := time.Now()
 	if info == nil || !info.WasInterrupted {
 		return singleEventIter(&adk.AgentEvent{Err: fmt.Errorf("invalid resume context")})
 	}
@@ -121,21 +127,25 @@ func (a *TicketCreateAgent) Resume(ctx context.Context, info *adk.ResumeInfo, _ 
 
 		// 如果用户补充信息的语言发生切换，后续固定提示也跟着切换。
 		state.Language = detectUserLanguage(resume.Answer)
-		draft, clarify, err := a.extractor.FillDraft(ctx, state.Draft, resume.Answer)
+		assistantContext := sessionString(ctx, "assistant_context")
+		draft, clarify, err := a.extractor.FillDraft(ctx, state.Draft, resume.Answer, assistantContext)
 		if err != nil {
 			return singleEventIter(&adk.AgentEvent{Err: err})
 		}
 		state.Draft = draft
+		a.debugLog(ctx, "itsm agent resume collect extracted draft in %dms subject=%q serviceLevel=%q priority=%q", time.Since(startedAt).Milliseconds(), draft.Subject, draft.ServiceLevel, draft.Priority)
 
 		if need, incomplete := a.needInfoInterrupt(state.Language, state.Draft, clarify); incomplete {
 			state.Pending = *need
 			state.Stage = stageCollect
+			a.debugLog(ctx, "itsm agent resume collect still need_info in %dms", time.Since(startedAt).Milliseconds())
 			return singleEventIter(adk.StatefulInterrupt(ctx, need, state))
 		}
 
 		confirm := a.buildConfirmInterrupt(state.Language, state.Draft)
 		state.Pending = *confirm
 		state.Stage = stageConfirm
+		a.debugLog(ctx, "itsm agent resume collect entered need_confirm in %dms", time.Since(startedAt).Milliseconds())
 		return singleEventIter(adk.StatefulInterrupt(ctx, confirm, state))
 
 	case stageConfirm:
@@ -169,6 +179,7 @@ func (a *TicketCreateAgent) Resume(ctx context.Context, info *adk.ResumeInfo, _ 
 		if execResult.Success {
 			text = localizedTicketCreatedText(state.Language, execResult.TicketNo)
 		}
+		a.debugLog(ctx, "itsm agent resume confirm finished in %dms success=%v", time.Since(startedAt).Milliseconds(), execResult.Success)
 		return singleEventIter(finalAssistantEvent(text, execResult))
 	default:
 		return singleEventIter(&adk.AgentEvent{Err: fmt.Errorf("unknown stage: %s", state.Stage)})
@@ -246,37 +257,38 @@ func (a *TicketCreateAgent) idempotencyKey(ctx context.Context, draft TicketDraf
 // needInfoInterrupt 根据当前草稿判断是否还需要继续追问用户。
 // 这是“工单是否完整”的最终裁决点。
 func (a *TicketCreateAgent) needInfoInterrupt(lang string, draft TicketDraft, clarify string) (*TicketInterruptInfo, bool) {
-	missing := make([]string, 0, 4)
+	internalMissing := make([]string, 0, 4)
 
 	// 这里是“完整性”的最终裁决点。模型只能给建议，缺不缺字段由这里决定。
 	if strings.TrimSpace(draft.Subject) == "" {
-		missing = append(missing, "subject")
+		internalMissing = append(internalMissing, "subject")
 	}
 	if strings.TrimSpace(draft.OthersDesc) == "" {
-		missing = append(missing, "othersDesc")
+		internalMissing = append(internalMissing, "othersDesc")
 	}
 	if !validEnumValue(draft.ServiceLevel) {
-		missing = append(missing, "serviceLevel")
+		internalMissing = append(internalMissing, "serviceLevel")
 	} else if draft.ServiceLevelConfidence > 0 && draft.ServiceLevelConfidence < a.enumThreshold {
-		missing = append(missing, "serviceLevel")
+		internalMissing = append(internalMissing, "serviceLevel")
 	}
 	if !validEnumValue(draft.Priority) {
-		missing = append(missing, "priority")
+		internalMissing = append(internalMissing, "priority")
 	} else if draft.PriorityConfidence > 0 && draft.PriorityConfidence < a.enumThreshold {
-		missing = append(missing, "priority")
+		internalMissing = append(internalMissing, "priority")
 	}
 
-	if len(missing) == 0 {
+	if len(internalMissing) == 0 {
 		return nil, false
 	}
 
-	missing = uniqueStrings(missing)
-	prompt := localizedNeedInfoPrompt(lang, missing, clarify)
+	internalMissing = uniqueStrings(internalMissing)
+	visibleMissing, enumDecisionPending := userVisibleMissingFields(internalMissing)
+	prompt := localizedNeedInfoPrompt(lang, visibleMissing, clarify, enumDecisionPending)
 	info := &TicketInterruptInfo{
 		Type:          statusNeedInfo,
 		Prompt:        prompt,
 		Language:      lang,
-		MissingFields: missing,
+		MissingFields: visibleMissing,
 		Draft:         draft,
 	}
 	return info, true
@@ -369,10 +381,6 @@ func missingFieldLabels(lang string, fields []string) []string {
 			labels = append(labels, localizeText(lang, "主题", "subject"))
 		case "othersDesc":
 			labels = append(labels, localizeText(lang, "问题描述", "description"))
-		case "serviceLevel":
-			labels = append(labels, localizeText(lang, "服务级别", "service level"))
-		case "priority":
-			labels = append(labels, localizeText(lang, "工单类型", "ticket type"))
 		default:
 			labels = append(labels, field)
 		}
@@ -380,11 +388,37 @@ func missingFieldLabels(lang string, fields []string) []string {
 	return labels
 }
 
-func localizedNeedInfoPrompt(lang string, missing []string, clarify string) string {
-	labels := strings.Join(missingFieldLabels(lang, missing), localizeText(lang, "、", ", "))
-	prompt := localizeText(lang, "信息还不完整，请补充：", "The information is incomplete. Please provide: ") + labels
+func userVisibleMissingFields(internalMissing []string) ([]string, bool) {
+	visible := make([]string, 0, len(internalMissing))
+	enumDecisionPending := false
+	for _, field := range internalMissing {
+		switch field {
+		case "serviceLevel", "priority":
+			enumDecisionPending = true
+		default:
+			visible = append(visible, field)
+		}
+	}
+	if enumDecisionPending {
+		// serviceLevel/priority 由系统决定，不要求用户直接填写。
+		// 当这两个枚举不确定时，统一向用户追问更具体的现象描述，便于模型继续判断。
+		visible = append(visible, "othersDesc")
+	}
+	return uniqueStrings(visible), enumDecisionPending
+}
+
+func localizedNeedInfoPrompt(lang string, missing []string, clarify string, enumDecisionPending bool) string {
+	var prompt string
+	if len(missing) > 0 {
+		labels := strings.Join(missingFieldLabels(lang, missing), localizeText(lang, "、", ", "))
+		prompt = localizeText(lang, "信息还不完整，请补充：", "The information is incomplete. Please provide: ") + labels
+	} else {
+		prompt = localizeText(lang, "信息还不完整，请补充更多信息。", "The information is incomplete. Please provide more details.")
+	}
 	if extra := strings.TrimSpace(clarify); extra != "" {
 		prompt += localizeText(lang, "。补充说明：", ". Additional details: ") + extra
+	} else if enumDecisionPending {
+		prompt += localizeText(lang, "。请尽量补充更具体的地点、故障现象和影响范围，系统会据此判断服务级别和工单类型。", ". Please provide more specific details about the location, symptoms, and impact scope so the system can determine the service level and ticket type.")
 	}
 	return prompt
 }
@@ -441,6 +475,6 @@ func chooseMessage(primary, fallback string) string {
 	return fallback
 }
 
-func logDebug(ctx context.Context, format string, args ...any) {
-	g.Log().Debugf(ctx, format, args...)
+func (a *TicketCreateAgent) debugLog(ctx context.Context, format string, args ...any) {
+	g.Log().Infof(ctx, format, args...)
 }

@@ -47,7 +47,7 @@ func TestNormalizePriority(t *testing.T) {
 	}
 }
 
-func TestNeedInfoInterruptUsesMissingFieldsAsPromptBase(t *testing.T) {
+func TestNeedInfoInterruptDoesNotAskUserForServiceLevelDirectly(t *testing.T) {
 	agent := NewTicketCreateAgent(nil, nil, nil, serviceConfig{EnumConfidenceThreshold: 0.75})
 	info, incomplete := agent.needInfoInterrupt("zh", TicketDraft{
 		UserCode:               "122020255",
@@ -61,11 +61,11 @@ func TestNeedInfoInterruptUsesMissingFieldsAsPromptBase(t *testing.T) {
 	if !incomplete {
 		t.Fatalf("expected incomplete draft")
 	}
-	if len(info.MissingFields) != 1 || info.MissingFields[0] != "serviceLevel" {
+	if len(info.MissingFields) != 1 || info.MissingFields[0] != "othersDesc" {
 		t.Fatalf("unexpected missing fields: %#v", info.MissingFields)
 	}
-	if !strings.Contains(info.Prompt, "服务级别") {
-		t.Fatalf("prompt should mention missing field label, got %q", info.Prompt)
+	if strings.Contains(info.Prompt, "服务级别") {
+		t.Fatalf("prompt should not ask user to fill service level directly, got %q", info.Prompt)
 	}
 	if !strings.Contains(info.Prompt, "补充说明") {
 		t.Fatalf("prompt should preserve clarify text as supplement, got %q", info.Prompt)
@@ -86,8 +86,8 @@ func TestNeedInfoInterruptUsesEnglishPromptForEnglishUsers(t *testing.T) {
 	if !incomplete {
 		t.Fatalf("expected incomplete draft")
 	}
-	if !strings.Contains(info.Prompt, "service level") {
-		t.Fatalf("prompt should mention English missing field label, got %q", info.Prompt)
+	if strings.Contains(strings.ToLower(info.Prompt), "service level") {
+		t.Fatalf("prompt should not ask English users to fill service level directly, got %q", info.Prompt)
 	}
 	if !strings.Contains(info.Prompt, "Additional details") {
 		t.Fatalf("prompt should preserve clarify text in English, got %q", info.Prompt)

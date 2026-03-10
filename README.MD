@@ -1,9 +1,68 @@
 # Lakeside
 
-本仓库基于 GoFrame，当前核心业务是一个基于 Eino ADK 的 ITSM 建单 agent。
+本仓库基于 GoFrame，当前核心业务是一个校园 `IT 小助手`，其中 `itsm agent` 作为第一个 subagent 负责工单建单流程。
 
 Quick Start:
 - https://goframe.org/quick
+
+## IT Assistant 概览
+
+当前顶层 `IT 小助手` 已接入：
+- 顶层接口：`/v1/assistant/query`、`/v1/assistant/resume`
+- 第一个 subagent：`itsm`
+- 顶层执行器：Eino ADK `ChatModelAgent`
+- 官方 middleware：`Summarization`、`PatchToolCalls`
+- 会话消息原文存储
+- ADK checkpoint 持久化
+- 异步长期记忆提取
+
+当前顶层流程是：
+1. 记录用户消息
+2. 读取用户长期记忆并组装 `assistant_context`
+3. 顶层 `ChatModelAgent` 决定直接回复还是调用 `itsm` subagent
+4. `Summarization Middleware` 在上下文过长时自动压缩历史
+5. `PatchToolCalls Middleware` 在 resume 前修补悬空 tool call
+6. 保存 assistant 可见回复
+7. 异步提取长期记忆
+
+当前持久化内容包括：
+- `assistant_sessions`
+- `assistant_messages`
+- `assistant_memories`
+
+`assistant_summaries` 表暂时保留，但当前主链路优先使用 ADK `Summarization Middleware` 做上下文压缩，不再在请求链路中手写滚动摘要。
+
+长期记忆调试接口：
+- `GET /v1/assistant/memories`：查看当前用户长期记忆
+- `POST /v1/assistant/memories/clear`：清除当前用户长期记忆
+
+注意：
+- 当前 `assistant_context` 只会注入 `assistant_memories`，不会注入 `assistant_summaries`
+- 如果助手在新会话里“知道”了宿舍位置、偏好老师等信息，优先去查 `assistant_memories`
+
+首期开发版使用 SQLite 持久化仓储，结构设计按后续切换 MSSQL 兼容来约束。
+
+## 测试说明
+
+- 日常回归：`go test ./...`
+- 顶层 assistant 的单元测试位于 `internal/service/assistant`
+- 可选 live 联调测试位于 `test/integration`
+- 当本地服务运行在 `127.0.0.1:8011` 时，可直接执行：
+
+```bash
+LAKESIDE_RUN_LIVE_TESTS=1 \
+LAKESIDE_TEST_USER_ID=122020255 \
+go test ./test/integration -run Live -v
+```
+
+- 若要测试 `resume`，可额外传入完整请求体：
+
+```bash
+LAKESIDE_RUN_LIVE_TESTS=1 \
+LAKESIDE_TEST_USER_ID=122020255 \
+LAKESIDE_LIVE_RESUME_BODY='{"session_id":"sess-xxx","checkpoint_id":"ckpt-xxx","targets":{"interrupt-id":{"confirmed":true}}}' \
+go test ./test/integration -run Resume -v
+```
 
 ## ITSM Agent 概览
 

@@ -7,8 +7,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/gogf/gf/v2/frame/g"
 
 	"lakeside/internal/service/chatmodels"
 )
@@ -19,10 +21,10 @@ func NewExtractor() *Extractor {
 	return &Extractor{}
 }
 
-func (e *Extractor) FillDraft(ctx context.Context, draft TicketDraft, userInput string) (TicketDraft, string, error) {
+func (e *Extractor) FillDraft(ctx context.Context, draft TicketDraft, userInput string, assistantContext string) (TicketDraft, string, error) {
 	// FillDraft 只负责“尽量补齐草稿”，不会在这里决定是否可以进入下一阶段。
 	// 是否完整由 agent.go 中的 needInfoInterrupt 统一裁决。
-	res, err := e.Extract(ctx, userInput, draft)
+	res, err := e.Extract(ctx, userInput, draft, assistantContext)
 	if err != nil {
 		return draft, "", err
 	}
@@ -62,9 +64,11 @@ func (e *Extractor) FillDraft(ctx context.Context, draft TicketDraft, userInput 
 	return draft, strings.TrimSpace(res.ClarifyQuestion), nil
 }
 
-func (e *Extractor) Extract(ctx context.Context, userInput string, current TicketDraft) (*ExtractResult, error) {
+func (e *Extractor) Extract(ctx context.Context, userInput string, current TicketDraft, assistantContext string) (*ExtractResult, error) {
 	// Extract 与模型的唯一契约是“返回 JSON”，因此 system/user prompt 都强调只输出结构化结果。
-	prompt := buildExtractPrompt(current, userInput)
+	startedAt := time.Now()
+	g.Log().Infof(ctx, "itsm extractor started input_len=%d assistant_context_len=%d", len(strings.TrimSpace(userInput)), len(strings.TrimSpace(assistantContext)))
+	prompt := buildExtractPrompt(current, userInput, assistantContext)
 	messages := []*schema.Message{
 		schema.SystemMessage(`你是 ITSM 工单字段抽取助手。请根据用户输入和当前草稿补全工单字段。只返回 JSON 对象，不要输出解释，不要输出 Markdown。`),
 		schema.UserMessage(prompt),
@@ -72,29 +76,37 @@ func (e *Extractor) Extract(ctx context.Context, userInput string, current Ticke
 
 	msg, err := chatmodels.GetChatModel(ctx).Generate(ctx, messages)
 	if err != nil {
+		g.Log().Warningf(ctx, "itsm extractor generate failed duration_ms=%d err=%v", time.Since(startedAt).Milliseconds(), err)
 		return nil, fmt.Errorf("extract fields generate failed: %w", err)
 	}
 	if msg == nil || strings.TrimSpace(msg.Content) == "" {
+		g.Log().Warningf(ctx, "itsm extractor got empty output duration_ms=%d", time.Since(startedAt).Milliseconds())
 		return nil, fmt.Errorf("extract fields got empty model output")
 	}
 
 	jsonText, err := findJSONObject(msg.Content)
 	if err != nil {
+		g.Log().Warningf(ctx, "itsm extractor failed to locate json duration_ms=%d err=%v", time.Since(startedAt).Milliseconds(), err)
 		return nil, fmt.Errorf("extract fields response has no json object: %w", err)
 	}
 
 	var out ExtractResult
 	if err := json.Unmarshal([]byte(jsonText), &out); err != nil {
+		g.Log().Warningf(ctx, "itsm extractor decode failed duration_ms=%d err=%v", time.Since(startedAt).Milliseconds(), err)
 		return nil, fmt.Errorf("extract fields decode failed: %w", err)
 	}
+	g.Log().Infof(ctx, "itsm extractor completed duration_ms=%d subject_set=%t service_level=%s priority=%s", time.Since(startedAt).Milliseconds(), strings.TrimSpace(out.Subject) != "", strings.TrimSpace(out.ServiceLevel), strings.TrimSpace(out.Priority))
 	return &out, nil
 }
 
-func buildExtractPrompt(current TicketDraft, userInput string) string {
+func buildExtractPrompt(current TicketDraft, userInput string, assistantContext string) string {
 	return fmt.Sprintf(`任务：根据用户输入抽取 ITSM 工单字段，并补全当前草稿。
 
 当前草稿 JSON：
 {"userCode":%q,"subject":%q,"serviceLevel":%q,"priority":%q,"othersDesc":%q}
+
+主助手补充上下文：
+%s
 
 用户输入：
 %q
@@ -120,6 +132,7 @@ func buildExtractPrompt(current TicketDraft, userInput string) string {
 - 如果缺影响范围，clarify_question 优先追问是单个设备、多台设备，还是整间宿舍/整个房间受影响。
 - serviceLevel 枚举映射：1=最高，2=高，3=中，4=低。
 - priority 枚举映射：1=咨询，2=服务，3=故障，4=反馈。
+- 不要在 clarify_question 中要求用户直接填写 serviceLevel 或 priority，要追问能帮助系统判断这两个枚举的事实信息。
 - 如果不确定，不要猜测，保留空值，并提供具体的 clarify_question。
 - clarify_question、subject、othersDesc 应尽量使用与用户输入相同的语言。`,
 		current.UserCode,
@@ -127,6 +140,7 @@ func buildExtractPrompt(current TicketDraft, userInput string) string {
 		current.ServiceLevel,
 		current.Priority,
 		current.OthersDesc,
+		assistantContext,
 		userInput,
 	)
 }

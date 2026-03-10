@@ -19,7 +19,7 @@ type AgentInterrupt struct {
 	InterruptID    string       `json:"interrupt_id" dc:"中断点 ID，resume 时作为 targets 的 key" example:"6819cf6c-ea98-49d2-82b3-3e7cbcbc90b7"`
 	Type           string       `json:"type" dc:"中断类型，如 need_info 或 need_confirm" example:"need_confirm"`
 	Prompt         string       `json:"prompt" dc:"展示给用户的提示文案" example:"请确认工单信息。你可以编辑 subject 和 othersDesc，确认后将正式提交。"`
-	MissingFields  []string     `json:"missing_fields,omitempty" dc:"当前仍需补充的字段名列表" example:"serviceLevel"`
+	MissingFields  []string     `json:"missing_fields,omitempty" dc:"当前仍需补充的用户可见信息字段列表；serviceLevel 和 priority 由系统自行判断，不会要求用户直接填写" example:"othersDesc"`
 	EditableFields []string     `json:"editable_fields,omitempty" dc:"确认阶段允许前端修改的字段名列表" example:"subject,othersDesc"`
 	ReadonlyFields []string     `json:"readonly_fields,omitempty" dc:"确认阶段只读展示的字段名列表" example:"userCode,serviceLevel,priority"`
 	Draft          *TicketDraft `json:"draft,omitempty" dc:"当前工单草稿"`
@@ -48,7 +48,7 @@ type AgentResponse struct {
 // 1. need_info：只传 answer。
 // 2. need_confirm：传 confirmed，可选覆盖 subject/othersDesc。
 type ResumeTarget struct {
-	Answer     string `json:"answer" dc:"补信息阶段提交的用户回答" example:"服务级别填3。道扬书院C1010，WiFi能搜到但连接后无法上网。"`
+	Answer     string `json:"answer" dc:"补信息阶段提交的用户回答" example:"道扬书院C1010，WiFi能搜到但连接后无法上网，宿舍里多台设备都受影响。"`
 	Confirmed  *bool  `json:"confirmed" dc:"确认阶段是否确认提交" example:"true"`
 	Subject    string `json:"subject" dc:"确认阶段可回写的工单主题" example:"道扬书院C1010宿舍 WiFi故障"`
 	OthersDesc string `json:"othersDesc" dc:"确认阶段可回写的问题描述" example:"WiFi能搜到但连接后无法上网，从昨晚开始，多台设备均无法使用。"`
@@ -94,8 +94,8 @@ var (
 							{
 								"interrupt_id":   "83120df4-a30d-44a4-b958-98a94689b8c7",
 								"type":           "need_info",
-								"prompt":         "信息还不完整，请补充：服务级别。补充说明：请提供寝室具体位置（楼号、房间号）及故障现象。",
-								"missing_fields": []string{"serviceLevel"},
+								"prompt":         "信息还不完整，请补充：问题描述。补充说明：请提供寝室具体位置（楼号、房间号）及故障现象。",
+								"missing_fields": []string{"othersDesc"},
 								"draft": g.Map{
 									"userCode":     "122020255",
 									"subject":      "寝室WiFi故障",
@@ -148,7 +148,7 @@ var (
 					"checkpoint_id": "ckpt-b64cb049-85a8-433a-a5b7-fb5ad6d2b0f0",
 					"targets": g.Map{
 						"83120df4-a30d-44a4-b958-98a94689b8c7": g.Map{
-							"answer": "服务级别填3。道扬书院C1010，WiFi能搜到但连接后无法上网，从昨晚开始。",
+							"answer": "道扬书院C1010，WiFi能搜到但连接后无法上网，从昨晚开始，宿舍里多台设备都受影响。",
 						},
 					},
 				},

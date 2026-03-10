@@ -7,6 +7,7 @@ import (
 	"github.com/gogf/gf/v2/net/ghttp"
 	"github.com/gogf/gf/v2/os/gcmd"
 
+	"lakeside/internal/controller/assistant"
 	"lakeside/internal/controller/hello"
 	"lakeside/internal/controller/itsm"
 	"lakeside/internal/openapi"
@@ -27,6 +28,7 @@ var (
 			s.Group("/", func(group *ghttp.RouterGroup) {
 				group.Middleware(ghttp.MiddlewareHandlerResponse)
 				group.Bind(
+					assistant.NewV1(),
 					hello.NewV1(),
 					itsm.NewV1(),
 				)

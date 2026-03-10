@@ -5,6 +5,7 @@ import (
 
 	"github.com/gogf/gf/v2/net/ghttp"
 	"github.com/gogf/gf/v2/net/goai"
+	assistantv1 "lakeside/api/assistant/v1"
 
 	itsmv1 "lakeside/api/itsm/v1"
 )
@@ -25,6 +26,10 @@ func patchAgentExamples(oai *goai.OpenApiV3) {
 	if oai == nil || oai.Paths == nil {
 		return
 	}
+	patchOperationExamples(getOperation(oai, "/v1/assistant/query", "post"), assistantv1.AssistantQueryReqExample, assistantv1.AssistantQueryResExamples)
+	patchOperationExamples(getOperation(oai, "/v1/assistant/resume", "post"), assistantv1.AssistantResumeReqExamples, assistantv1.AssistantResumeResExamples)
+	patchOperationExamples(getOperation(oai, "/v1/assistant/memories", "get"), nil, assistantv1.AssistantMemoriesResExamples)
+	patchOperationExamples(getOperation(oai, "/v1/assistant/memories/clear", "post"), assistantv1.AssistantMemoriesClearReqExample, assistantv1.AssistantMemoriesClearResExamples)
 	patchOperationExamples(getOperation(oai, "/v1/itsm/agent/query", "post"), itsmv1.AgentQueryReqExample, itsmv1.AgentQueryResExamples)
 	patchOperationExamples(getOperation(oai, "/v1/itsm/agent/resume", "post"), itsmv1.AgentResumeReqExamples, itsmv1.AgentResumeResExamples)
 }

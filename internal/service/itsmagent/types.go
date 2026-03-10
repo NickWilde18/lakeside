@@ -19,14 +19,16 @@ const (
 )
 
 type QueryRequest struct {
-	UserCode string
-	Message  string
+	UserCode         string
+	Message          string
+	AssistantContext string
 }
 
 type ResumeRequest struct {
-	CheckpointID string
-	UserCode     string
-	Targets      map[string]*v1.ResumeTarget
+	CheckpointID     string
+	UserCode         string
+	Targets          map[string]*v1.ResumeTarget
+	AssistantContext string
 }
 
 type TicketDraft struct {
