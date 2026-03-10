@@ -102,3 +102,16 @@ func TestDetectUserLanguage(t *testing.T) {
 		t.Fatalf("detectUserLanguage english got %q", got)
 	}
 }
+
+func TestBuildExtractPromptContainsServiceLevelAndPriorityRules(t *testing.T) {
+	prompt := buildExtractPrompt(TicketDraft{}, "宿舍WiFi坏了", "无")
+	if !strings.Contains(prompt, "默认填写 3（中）") {
+		t.Fatalf("prompt should contain default serviceLevel rule, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "多个人 / 多个寝室 / 多位同事 / 多台终端") {
+		t.Fatalf("prompt should contain serviceLevel escalation rule, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "WiFi 坏了、网页打不开、连不上网") {
+		t.Fatalf("prompt should contain priority fault examples, got %q", prompt)
+	}
+}

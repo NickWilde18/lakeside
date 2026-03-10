@@ -17,7 +17,7 @@
 - `make image` / `make image.push`: build and optionally push Docker image.
 
 ## Coding Style & Naming Conventions
-- Language: Go 1.18+, format with `gofmt` (or `go fmt ./...`).
+- Language: Go `1.26.0`, format with `gofmt` (or `go fmt ./...`).
 - Keep packages small and focused; prefer clear service boundaries.
 - API definitions must use paired names: `XxxReq` and `XxxRes`.
 - In `api/*/v1`, keep each `Req`/`Res` as a paired declaration. If a `Res` depends on custom structs, declare those structs immediately before that `Res`.
@@ -27,7 +27,7 @@
 - During collaboration, if new global requirements or coding conventions are agreed in chat, update `AGENTS.md` immediately so rules stay source-of-truth.
 
 ## Testing Guidelines
-- Use Go `testing` package.
+- Use Go `testing` package; `testify/require` is allowed and already used in this repo for concise assertions.
 - Test files end with `_test.go`; functions use `TestXxx` naming.
 - Place tests next to implementation (for example `internal/service/itsmclient/client_test.go`).
 - Minimum check before pushing: `go test ./...`.

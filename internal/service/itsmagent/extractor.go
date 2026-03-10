@@ -130,8 +130,22 @@ func buildExtractPrompt(current TicketDraft, userInput string, assistantContext 
 - 如果缺地点，clarify_question 优先追问楼号和房间号。
 - 如果缺故障现象，clarify_question 优先追问是搜不到信号、连上没网、间歇断连，还是其他具体现象。
 - 如果缺影响范围，clarify_question 优先追问是单个设备、多台设备，还是整间宿舍/整个房间受影响。
-- serviceLevel 枚举映射：1=最高，2=高，3=中，4=低。
-- priority 枚举映射：1=咨询，2=服务，3=故障，4=反馈。
+- serviceLevel 判定规则：
+  - 默认填写 3（中）。
+  - 当用户明确描述“同时有多个人 / 多个寝室 / 多位同事 / 多台终端”出现同类问题时，填写 2（高）。
+  - 当用户明确描述大规模网络中断、大规模打印机无法使用、大规模邮件系统故障无法收发邮件等全局性或大范围故障时，填写 1（最高）。
+  - 不要仅凭单个用户的网络差、网页打不开、单点打印失败就填写 1。
+  - 如果用户描述不足以判断是否为多人同时受影响，优先保持 3，并通过 clarify_question 追问影响范围。
+- priority 判定规则：
+  - 1=咨询：用户是在咨询业务、流程、规则、用法或其他说明性问题。
+  - 2=服务：用户希望 ITSO 提供服务，例如预约会议支持、现场支持、协助配置等。
+  - 3=故障：系统、网络、打印机、邮箱、账号、设备等出现异常、不可用、报错、无法连接、无法收发等故障。
+  - 4=反馈：用户是在提出建议、投诉、意见或其他反馈。
+  - 对“WiFi 坏了、网页打不开、连不上网、打印机报错、邮箱无法收发”这类表达，通常应判为 3（故障）。
+- confidence 判定规则：
+  - 当用户描述直接、明确命中上述规则时，serviceLevel_confidence 和 priority_confidence 应给高分。
+  - 当需要根据较弱线索推断时，confidence 降低。
+  - 如果完全无法判断，可保留空值，但要优先追问能帮助判断 serviceLevel 或 priority 的事实信息。
 - 不要在 clarify_question 中要求用户直接填写 serviceLevel 或 priority，要追问能帮助系统判断这两个枚举的事实信息。
 - 如果不确定，不要猜测，保留空值，并提供具体的 clarify_question。
 - clarify_question、subject、othersDesc 应尽量使用与用户输入相同的语言。`,

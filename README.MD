@@ -42,6 +42,88 @@ Quick Start:
 
 首期开发版使用 SQLite 持久化仓储，结构设计按后续切换 MSSQL 兼容来约束。
 
+## 长期记忆设计
+
+当前长期记忆的目标不是保存所有聊天内容，而是提取“跨会话仍然有价值”的稳定事实，例如：
+- 用户常用地点
+- 用户身份补充信息
+- 用户偏好语言
+- 用户偏好对接老师
+- 常见设备信息
+
+### 1. 原始消息如何保存
+
+每轮对话的可见消息会先进入 `assistant_messages`：
+- 用户输入
+- assistant 回复
+- interrupt prompt
+
+这层是原始记录和审计基础，也是长期记忆提取的输入来源。
+
+### 2. 长期记忆如何提取
+
+当前实现位于：
+- [memory.go](/home/nickw/lakeside/internal/service/assistant/memory.go)
+
+流程是：
+1. 每轮 assistant 响应完成后，异步投递一个 memory job
+2. worker 读取该会话最近消息 + 当前已存在的长期记忆
+3. 调模型提取稳定事实
+4. 以 `(user_code, category, canonical_key)` 为唯一键 upsert 到 `assistant_memories`
+
+当前支持的 category：
+- `identity`
+- `role`
+- `location`
+- `preference`
+- `relationship`
+- `device`
+- `habit`
+- `contact`
+
+### 3. 长期记忆如何参与后续对话
+
+当前实现位于：
+- [service.go](/home/nickw/lakeside/internal/service/assistant/service.go#L334)
+
+`query` / `resume` 前，会读取当前用户的长期记忆并拼成：
+
+```text
+当前用户工号：xxx
+长期记忆：[category/canonical_key] content；...
+```
+
+然后作为 `assistant_context` 注入顶层 assistant 与 itsm subagent。
+
+注意：
+- 当前是“全部 active memories 直接注入”
+- 不区分“强记忆 / 弱记忆”
+- 不做按场景筛选
+
+所以如果库里已经有 `location/dormitory_location -> 用户住在道扬书院C1010`，那么用户下一次只说“寝室 WiFi 坏了”，模型也可能直接带上 `道扬书院C1010`。
+
+### 4. 如何查看和清除长期记忆
+
+接口：
+- `GET /v1/assistant/memories`
+- `POST /v1/assistant/memories/clear`
+
+用途：
+- 查看当前用户有哪些长期记忆被注入
+- 定向删除一条记忆
+- 清空当前用户全部长期记忆
+
+测试示例见：
+- [TESTING.md](/home/nickw/lakeside/TESTING.md)
+
+### 5. 当前限制
+
+当前长期记忆方案还比较直接，后续建议继续做：
+- 记忆分类分级，避免所有记忆无条件注入
+- 增加“仅在相关场景注入”的策略
+- 增加用户纠错和人工审核机制
+- 增加记忆置信度阈值和过期策略
+
 ## 测试说明
 
 - 日常回归：`go test ./...`
