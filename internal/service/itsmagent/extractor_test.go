@@ -48,7 +48,7 @@ func TestNormalizePriority(t *testing.T) {
 }
 
 func TestNeedInfoInterruptDoesNotAskUserForServiceLevelDirectly(t *testing.T) {
-	agent := NewTicketCreateAgent(nil, nil, nil, serviceConfig{EnumConfidenceThreshold: 0.75})
+	agent := NewTicketCreateAgent(nil, nil, nil, nil, serviceConfig{EnumConfidenceThreshold: 0.75})
 	info, incomplete := agent.needInfoInterrupt("zh", TicketDraft{
 		UserCode:               "122020255",
 		Subject:                "寝室WiFi故障",
@@ -73,7 +73,7 @@ func TestNeedInfoInterruptDoesNotAskUserForServiceLevelDirectly(t *testing.T) {
 }
 
 func TestNeedInfoInterruptUsesEnglishPromptForEnglishUsers(t *testing.T) {
-	agent := NewTicketCreateAgent(nil, nil, nil, serviceConfig{EnumConfidenceThreshold: 0.75})
+	agent := NewTicketCreateAgent(nil, nil, nil, nil, serviceConfig{EnumConfidenceThreshold: 0.75})
 	info, incomplete := agent.needInfoInterrupt("en", TicketDraft{
 		UserCode:               "122020255",
 		Subject:                "Dorm WiFi issue",
@@ -113,5 +113,8 @@ func TestBuildExtractPromptContainsServiceLevelAndPriorityRules(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "WiFi 坏了、网页打不开、连不上网") {
 		t.Fatalf("prompt should contain priority fault examples, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "跨用户集中爆发的升级由系统在提交前根据近期相似工单聚合结果处理") {
+		t.Fatalf("prompt should mention server-side escalation, got %q", prompt)
 	}
 }

@@ -5,6 +5,11 @@
 Quick Start:
 - https://goframe.org/quick
 
+配置说明：
+- 运行时配置文件：`config/config.yaml`
+- 注释版配置示例：`config/config.example.yaml`
+- 启动时会执行强类型配置校验，校验逻辑见 [config_validate.go](/home/nickw/lakeside/internal/cmd/config_validate.go)
+
 ## IT Assistant 概览
 
 当前顶层 `IT 小助手` 已接入：
@@ -15,6 +20,8 @@ Quick Start:
 - 会话消息原文存储
 - ADK checkpoint 持久化
 - 异步长期记忆提取
+- OpenRouter embedding + Eino cache embedding
+- ITSM 相似问题聚合与服务级别自动升级
 
 当前顶层流程是：
 1. 记录用户消息
@@ -29,6 +36,16 @@ Quick Start:
 - `assistant_sessions`
 - `assistant_messages`
 - `assistant_memories`
+
+当前 Redis 资源统一按命名空间组织：
+- agent 自有状态：`lakeside:{plane}:{scope_path}:{agent_kind}:{agent_name}:...:v1:*`
+- 共享基础设施：`lakeside:shared:{component}:...:v1:*`
+
+当前已落地的 key 前缀包括：
+- `lakeside:interactive:it:host:main:checkpoint:v1:`
+- `lakeside:interactive:it:subagent:itsm:checkpoint:v1:`
+- `lakeside:interactive:it:subagent:itsm:idempotency:v1:`
+- `lakeside:shared:embedding:cache:v1:`
 
 `assistant_summaries` 表暂时保留，但当前主链路优先使用 ADK `Summarization Middleware` 做上下文压缩，不再在请求链路中手写滚动摘要。
 
@@ -160,6 +177,22 @@ go test ./test/integration -run Resume -v
 2. Go 代码负责判断字段是否已经完整，决定是继续追问还是进入确认阶段。
 
 也就是说，是否“信息完整”不是完全由模型自由决定，而是以服务端代码中的规则为准。
+
+## ITSM 相似问题聚合与服务级别升级
+
+当前 ITSM 提交前新增了一层“相似问题聚合”：
+1. 根据 `subject + othersDesc + priority` 规范化出事件字段
+2. 用 OpenRouter `qwen/qwen3-embedding-8b` 生成 embedding
+3. 通过 Eino `cache embedding` 把重复文本的 embedding 缓存在 Redis
+4. 把最近 10 分钟的同类事件从 Redis 取回，在应用侧做余弦相似度比对并归簇
+5. 如果当前工单原始 `serviceLevel` 为 `2` 或 `3`，且同一相似簇里最近 10 分钟已有至少 5 个不同用户，影响范围达到楼宇/区域级，则只把当前新工单升级为 `1`
+
+说明：
+- 这层升级只影响新提交工单，不回写已创建工单
+- 当前只对 `priority=3` 的故障类工单启用
+- `itsm.signal.enabled=false` 或 embedding 不可用时，会跳过升级，不阻塞建单
+- 模型 prompt 只负责给出默认 `3`、多人同类问题 `2`、用户明确描述大范围故障时 `1`
+- “跨用户聚合后升到 1” 是服务端后处理，不由模型自行猜测
 
 ## 调用链总览
 

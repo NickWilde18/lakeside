@@ -19,6 +19,7 @@ var (
 		Usage: "main",
 		Brief: "start http server",
 		Func: func(ctx context.Context, parser *gcmd.Parser) (err error) {
+			validateStartupConfig(ctx)
 			s := g.Server()
 			openAPIPath := g.Cfg().MustGet(ctx, "server.openapiPath", "/api.json").String()
 			// 在输出 /api.json 前补充业务示例，保持接口定义与示例都集中在 api 包。

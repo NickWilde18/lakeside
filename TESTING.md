@@ -177,7 +177,24 @@ curl -sS -X POST http://127.0.0.1:8011/v1/assistant/memories/clear \
 sqlite3 runtime/assistant.db "select id,user_code,category,canonical_key,content,confidence,status from assistant_memories order by id desc;"
 ```
 
-## 8. 日志观察点
+## 8. ITSM 相似问题聚合与 P1 升级
+
+这一层主要靠单元测试验证：
+
+```bash
+go test ./internal/service/itsmagent -run 'Signal|Promote|Normalize' -v
+go test ./internal/service/embeddings -v
+go test ./internal/consts -v
+```
+
+覆盖点：
+- Redis key 是否符合新的全局命名空间
+- embedding cache key 是否带上 provider 和 model
+- 事件规范化是否能抽出 `domain/object/symptom/scope/locationScope`
+- `serviceLevel=2/3` 是否会在满足门槛时升级到 `1`
+- `serviceLevel=4` 是否不会被误升
+
+## 9. 日志观察点
 
 出现慢响应时，优先看这些日志：
 
@@ -185,6 +202,7 @@ sqlite3 runtime/assistant.db "select id,user_code,category,canonical_key,content
 - `assistant resume started`
 - `assistant agent callback start/end`
 - `itsm extractor started`
+- `itsm signal escalation triggered`
 - `assistant query completed`
 
 如果 `curl` 自己超时，服务端通常会看到 `context canceled`，这表示客户端先断开了，不一定是服务端崩了。

@@ -1,0 +1,124 @@
+# Lakeside 配置示例。
+# 这个文件用于说明“每个配置项应该填什么”，运行时实际读取的是同目录下的 config.yaml。
+
+server:
+  # HTTP 监听地址。开发环境可直接写 :8000 或 :8011。
+  address: ":8000"
+  # OpenAPI JSON 暴露路径。
+  openapiPath: "/api.json"
+  # Swagger UI 暴露路径。
+  swaggerPath: "/swagger"
+
+logger:
+  # GoFrame 日志级别，例如 all / dev / prod。
+  level: "all"
+  # 是否输出到标准输出。
+  stdout: true
+
+model:
+  # 当前主对话模型提供方。仅支持 qwen / openrouter。
+  provider: "openrouter"
+  # 是否开启模型思考模式。对响应速度敏感时建议 false。
+  enableThinking: false
+
+  qwen:
+    # 当 provider=qwen 时填写。
+    apiKey: "YOUR_QWEN_API_KEY"
+    # 例如 qwen-plus。
+    modelName: "qwen-plus"
+
+  openrouter:
+    # 当 provider=openrouter 时填写。
+    apiKey: "YOUR_OPENROUTER_API_KEY"
+    # 当前用于对话的模型名。
+    modelName: "moonshotai/kimi-k2.5"
+
+embedding:
+  openrouter:
+    # embedding 专用 APIKey。留空时会回退复用 model.openrouter.apiKey。
+    apiKey: ""
+    # OpenRouter OpenAI-compatible embeddings 地址。
+    baseURL: "https://openrouter.ai/api/v1"
+    # 当前 embedding 模型名。
+    modelName: "qwen/qwen3-embedding-8b"
+    # embedding 请求超时，单位毫秒。
+    timeoutMs: 15000
+
+  cache:
+    # 是否启用 Eino cache embedding。
+    enabled: false
+    # embedding 缓存 TTL，单位小时。
+    ttlHours: 24
+
+agent:
+  # serviceLevel / priority 低于该置信度时，仍按“信息不完整”处理。
+  enumConfidenceThreshold: 0.75
+
+  redis:
+    # Redis 地址。checkpoint、embedding cache、signal 聚合共用这一套 Redis。
+    addr: "127.0.0.1:6379"
+    password: ""
+    db: 0
+
+  checkpoint:
+    # ITSM subagent checkpoint TTL，单位小时。
+    ttlHours: 24
+
+  idempotency:
+    # ITSM 建单成功结果的幂等缓存 TTL，单位小时。
+    ttlHours: 24
+
+assistant:
+  storage:
+    # 顶层 assistant 的 SQLite 路径。
+    sqlitePath: "./runtime/assistant.db"
+
+  checkpoint:
+    # 顶层 assistant checkpoint TTL，单位小时。
+    ttlHours: 24
+
+  summarization:
+    # 触发 ADK Summarization Middleware 的上下文 token 上限。
+    contextTokens: 12000
+    # 压缩时尽量保留的用户消息 token 预算。
+    preserveUserMessageTokens: 2000
+
+  agent:
+    # 顶层 assistant 最大推理轮数。
+    maxIterations: 6
+
+  memory:
+    # 每个用户最多注入多少条长期记忆。
+    maxItems: 8
+    # 长期记忆异步 worker 数。
+    workers: 1
+    # 长期记忆任务队列长度。
+    queueSize: 32
+
+itsm:
+  # 下游 ITSM 接口地址。
+  baseURL: "http://127.0.0.1:8889/rest/callOnlineAi"
+  # 下游 ITSM 接口密钥。
+  appSecret: "YOUR_ITSM_APP_SECRET"
+  # ITSM 请求超时，单位毫秒。
+  timeoutMs: 15000
+
+  retry:
+    # 建单失败时最大重试次数。
+    maxAttempts: 3
+    # 每次重试前的退避时间，单位毫秒。
+    backoffMs: [1000, 2000, 4000]
+
+  signal:
+    # 是否启用“相似问题聚合后自动升级为 P1”的增强能力。
+    enabled: true
+    # 聚合时间窗，单位分钟。
+    windowMinutes: 10
+    # 聚合事件在 Redis 中的保留时长，单位小时。
+    retentionHours: 24
+    # 至少多少个不同用户触发后才考虑升级。
+    minDistinctUsersForP1: 5
+    # 每次最多取多少条候选事件做相似度比对。
+    maxCandidates: 200
+    # 归为同类问题的相似度阈值，范围 0~1。
+    similarityThreshold: 0.90

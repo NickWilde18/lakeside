@@ -13,23 +13,42 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/gogf/gf/v2/frame/g"
 
+	"lakeside/internal/consts"
 	"lakeside/internal/service/itsmclient"
 )
 
+// TicketCreateAgent 是 ITSM 建单子 Agent 的核心执行器。
+//
+// 它承载“抽取草稿 -> 缺失信息中断 -> 二次确认中断 -> 调用 ITSM 提交”的完整状态机逻辑，
+// 并在提交阶段统一处理幂等和相似问题聚合升级。
+//
+// 接口实现：
+//   - Name/Description：用于向 ADK 暴露 agent 基础信息。
+//   - Run：处理首次进入流程（query）。
+//   - Resume：处理中断后的继续执行（resume）。
+//
+// 因此该类型按 ADK 约定实现了可中断会话 Agent 所需的方法集合。
 type TicketCreateAgent struct {
 	name              string
 	description       string
 	extractor         *Extractor
 	itsmClient        *itsmclient.Client
 	idempotencyStore  idempotencyStore
+	signalService     *signalService
 	enumThreshold     float64
 	idempotencyKeyPre string
 	idempotencyTTL    time.Duration
 }
 
-// NewTicketCreateAgent 构造业务状态机。
-// 这里不直接依赖 controller/service，而是只关心“抽取器 + 下游 ITSM 客户端 + 幂等存储”。
-func NewTicketCreateAgent(extractor *Extractor, itsmClient *itsmclient.Client, idemStore idempotencyStore, cfg serviceConfig) *TicketCreateAgent {
+// NewTicketCreateAgent 构造 ITSM 建单业务状态机。
+//
+// 参数说明：
+//   - extractor: 负责从用户输入抽取工单草稿字段，并生成补充提问建议。
+//   - itsmClient: 负责调用下游 ITSM 接口提交工单。
+//   - idemStore: 负责保存/读取提交幂等结果，避免重复建单。
+//   - signalService: 负责相似问题聚合与服务级别自动升级；为 nil 时关闭该能力。
+//   - cfg: 运行配置，包含枚举置信度阈值与幂等 TTL 等。
+func NewTicketCreateAgent(extractor *Extractor, itsmClient *itsmclient.Client, idemStore idempotencyStore, signalService *signalService, cfg serviceConfig) *TicketCreateAgent {
 	threshold := cfg.EnumConfidenceThreshold
 	if threshold <= 0 {
 		threshold = 0.75
@@ -40,8 +59,9 @@ func NewTicketCreateAgent(extractor *Extractor, itsmClient *itsmclient.Client, i
 		extractor:         extractor,
 		itsmClient:        itsmClient,
 		idempotencyStore:  idemStore,
+		signalService:     signalService,
 		enumThreshold:     threshold,
-		idempotencyKeyPre: cfg.IdempotencyKeyPrefix,
+		idempotencyKeyPre: consts.ITSMIdempotencyPrefix,
 		idempotencyTTL:    cfg.IdempotencyTTL,
 	}
 }
@@ -187,7 +207,13 @@ func (a *TicketCreateAgent) Resume(ctx context.Context, info *adk.ResumeInfo, _ 
 }
 
 // submitTicket 是真正触发下游建单的唯一入口。
-// 所有确认完成后的请求都会收敛到这里，方便统一做幂等、重试和结果包装。
+//
+// 设计原因：
+//   - 即使流程在 done/cancel 后会删除 checkpoint，仍可能存在“下游已成功建单但响应丢失/客户端重试”的窗口。
+//   - 仅依赖 checkpoint 失效无法完全防止重复调用下游接口，因此这里增加幂等缓存，兜底防重建单。
+//   - 幂等命中时直接返回已成功结果，不再触发第二次建单请求。
+//
+// 所有确认完成后的请求都会收敛到这里，便于统一处理幂等、重试与结果包装。
 func (a *TicketCreateAgent) submitTicket(ctx context.Context, lang string, draft TicketDraft) *TicketExecutionResult {
 	// 先查幂等缓存，避免同一 checkpoint 在重复确认时创建多张工单。
 	if key := a.idempotencyKey(ctx, draft); key != "" {
@@ -200,17 +226,35 @@ func (a *TicketCreateAgent) submitTicket(ctx context.Context, lang string, draft
 		}
 	}
 
-	result, err := a.itsmClient.CreateTicket(ctx, itsmclient.TicketPayload{
+	payload := itsmclient.TicketPayload{
 		UserCode:     draft.UserCode,
 		Subject:      draft.Subject,
 		ServiceLevel: draft.ServiceLevel,
 		Priority:     draft.Priority,
 		OthersDesc:   draft.OthersDesc,
-	})
+	}
+	decision, err := a.prepareSignalDecision(ctx, draft)
+	if err != nil {
+		g.Log().Warningf(ctx, "itsm signal prepare failed, continue without escalation: %v", err)
+	}
+	if decision != nil {
+		payload.ServiceLevel = decision.AppliedLevel
+		if decision.ShouldPromoteP1 {
+			g.Log().Infof(ctx, "itsm signal escalation triggered, cluster_id=%s distinct_users=%d impact_scope=%s original_level=%s applied_level=%s similarity=%.4f",
+				decision.MatchedClusterID, decision.DistinctUsers, decision.ImpactScope, draft.ServiceLevel, decision.AppliedLevel, decision.Similarity)
+		}
+	}
+
+	result, err := a.itsmClient.CreateTicket(ctx, payload)
 	if err != nil {
 		return &TicketExecutionResult{
 			Success: false,
 			Message: localizeText(lang, fmt.Sprintf("调用工单系统失败：%v", err), fmt.Sprintf("Failed to call the ticket system: %v", err)),
+		}
+	}
+	if decision != nil {
+		if recordErr := a.signalService.Record(ctx, decision); recordErr != nil {
+			g.Log().Warningf(ctx, "itsm signal record failed after ticket creation: %v", recordErr)
 		}
 	}
 
@@ -232,6 +276,19 @@ func (a *TicketCreateAgent) submitTicket(ctx context.Context, lang string, draft
 	return exec
 }
 
+func (a *TicketCreateAgent) prepareSignalDecision(ctx context.Context, draft TicketDraft) (*signalDecision, error) {
+	if a == nil || a.signalService == nil {
+		return nil, nil
+	}
+	return a.signalService.Prepare(ctx, draft)
+}
+
+// idempotencyKey 生成“同一流程内同一份建单内容”的幂等键。
+//
+// 设计原因：
+// - key 由 checkpoint_id + 工单核心字段摘要组成，约束在当前会话流程内防重。
+// - 这样既能避免重复点击确认导致的重复建单，也不会影响新的 query 流程正常建单。
+// - 失败结果不入缓存，只缓存成功结果，避免把临时失败固化。
 func (a *TicketCreateAgent) idempotencyKey(ctx context.Context, draft TicketDraft) string {
 	checkpointID := strings.TrimSpace(sessionString(ctx, "checkpoint_id"))
 	if checkpointID == "" {

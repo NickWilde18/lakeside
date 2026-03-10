@@ -87,9 +87,13 @@ type ExtractResult struct {
 }
 
 type serviceConfig struct {
+	// agent.enumConfidenceThreshold
+	// serviceLevel / priority 低于该置信度时，仍按“信息不完整”处理。
 	EnumConfidenceThreshold float64
-	CheckpointTTL           time.Duration
-	IdempotencyTTL          time.Duration
-	CheckpointKeyPrefix     string
-	IdempotencyKeyPrefix    string
+	// agent.checkpoint.ttlHours
+	// ITSM subagent checkpoint TTL。
+	CheckpointTTL time.Duration
+	// agent.idempotency.ttlHours
+	// submit 成功结果的幂等缓存 TTL。
+	IdempotencyTTL time.Duration
 }

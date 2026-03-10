@@ -22,6 +22,8 @@
 - API definitions must use paired names: `XxxReq` and `XxxRes`.
 - In `api/*/v1`, keep each `Req`/`Res` as a paired declaration. If a `Res` depends on custom structs, declare those structs immediately before that `Res`.
 - `XxxRes` must be a concrete struct type (not a type alias) to satisfy GoFrame runtime response naming checks.
+- When config semantics are documented in code, put them on the config struct fields or config type definition, not as ad-hoc comment blocks at individual read sites.
+- For exported Go symbols, prefer standard Go doc style comments over ad-hoc parameter bullet lists.
 - Do not hand-write controller skeletons. Define API first, then run `gf gen ctrl`.
 - Controller methods should match generated interface names (for example `AgentQuery`, `AgentResume`).
 - During collaboration, if new global requirements or coding conventions are agreed in chat, update `AGENTS.md` immediately so rules stay source-of-truth.
@@ -46,3 +48,6 @@
 - Never commit real secrets (`model.*.apiKey`, `itsm.appSecret`, Redis password).
 - Use environment-specific config overrides for production.
 - For multi-instance ADK resume, configure shared Redis checkpoint storage.
+- Keep `config/config.yaml` lean for real runtime values, and put human-facing field explanations/examples in `config/config.example.yaml`.
+- Prefer code constants over runtime config for fixed Redis key prefixes or other internal namespace conventions unless they truly need environment-level override.
+- Redis is a required infrastructure dependency for checkpoint/idempotency persistence in this repo; do not add in-memory fallback paths for those stores.

@@ -11,9 +11,11 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/gogf/gf/v2/frame/g"
 	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
 
 	"lakeside/api/itsm/v1"
+	"lakeside/internal/consts"
+	"lakeside/internal/infra/rediskit"
+	"lakeside/internal/service/embeddings"
 	"lakeside/internal/service/itsmclient"
 )
 
@@ -41,11 +43,9 @@ func newService(ctx context.Context) *Service {
 		EnumConfidenceThreshold: g.Cfg().MustGet(ctx, "agent.enumConfidenceThreshold", 0.75).Float64(),
 		CheckpointTTL:           time.Duration(g.Cfg().MustGet(ctx, "agent.checkpoint.ttlHours", 24).Int()) * time.Hour,
 		IdempotencyTTL:          time.Duration(g.Cfg().MustGet(ctx, "agent.idempotency.ttlHours", 24).Int()) * time.Hour,
-		CheckpointKeyPrefix:     g.Cfg().MustGet(ctx, "agent.checkpoint.keyPrefix", "itsm:adk:checkpoint:").String(),
-		IdempotencyKeyPrefix:    g.Cfg().MustGet(ctx, "agent.idempotency.keyPrefix", "itsm:adk:idempotency:").String(),
 	}
 
-	// 优先使用 Redis 持久化 checkpoint/幂等状态，失败时降级为内存实现保证可用性。
+	// checkpoint 与幂等状态统一使用 Redis 持久化。
 	checkpointStore, idemStore := initStores(ctx, cfg)
 	itsm := itsmclient.NewClient(itsmclient.Config{
 		BaseURL:     g.Cfg().MustGet(ctx, "itsm.baseURL").String(),
@@ -55,7 +55,8 @@ func newService(ctx context.Context) *Service {
 		Backoffs:    parseBackoffConfig(g.Cfg().MustGet(ctx, "itsm.retry.backoffMs", []int{1000, 2000, 4000}).Ints()),
 	})
 
-	agent := NewTicketCreateAgent(NewExtractor(), itsm, idemStore, cfg)
+	signalService := newSignalService(ctx, embeddings.GetService(ctx))
+	agent := NewTicketCreateAgent(NewExtractor(), itsm, idemStore, signalService, cfg)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:           agent,
 		EnableStreaming: false,
@@ -70,27 +71,10 @@ func GetAgent(ctx context.Context) adk.Agent {
 }
 
 func initStores(ctx context.Context, cfg serviceConfig) (checkpointStore, idempotencyStore) {
-	redisAddr := strings.TrimSpace(g.Cfg().MustGet(ctx, "agent.redis.addr").String())
-	if redisAddr == "" {
-		g.Log().Warning(ctx, "agent.redis.addr is empty, fallback to in-memory checkpoint/idempotency store")
-		return newInMemoryCheckpointStore(), newInMemoryIdempotencyStore()
-	}
-
-	client := redis.NewClient(&redis.Options{
-		Addr:     redisAddr,
-		Password: g.Cfg().MustGet(ctx, "agent.redis.password").String(),
-		DB:       g.Cfg().MustGet(ctx, "agent.redis.db", 0).Int(),
-	})
-	pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	if err := client.Ping(pingCtx).Err(); err != nil {
-		g.Log().Warningf(ctx, "redis unavailable, fallback to in-memory store: %v", err)
-		return newInMemoryCheckpointStore(), newInMemoryIdempotencyStore()
-	}
-
+	client := rediskit.MustClient(ctx)
 	ckpt := &redisCheckpointStore{
 		client:    client,
-		keyPrefix: cfg.CheckpointKeyPrefix,
+		keyPrefix: consts.ITSMCheckpointPrefix,
 		ttl:       cfg.CheckpointTTL,
 	}
 	idem := &redisIdempotencyStore{client: client}
