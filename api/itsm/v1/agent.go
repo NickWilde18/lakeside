@@ -56,7 +56,7 @@ type ResumeTarget struct {
 
 type AgentQueryReq struct {
 	g.Meta  `path:"/v1/itsm/agent/query" tags:"ITSM" method:"post" summary:"发起 ITSM 工单对话" dc:"根据用户自然语言生成工单草稿，必要时返回 need_info 或 need_confirm" example:"{\"message\":\"寝室 WiFi 坏了，连不上网\"}"`
-	UserID  string `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录人工号，请求头 X-User-ID" example:"122020255"`
+	UserID  string `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID；Lakeside 会在内部换取下游 ITSM 所需的员工编号" example:"122020255@link.cuhk.edu.cn"`
 	Message string `json:"message" v:"required" dc:"用户本轮输入内容" example:"寝室 WiFi 坏了，连不上网"`
 }
 
@@ -66,7 +66,7 @@ type AgentQueryRes struct {
 
 type AgentResumeReq struct {
 	g.Meta       `path:"/v1/itsm/agent/resume" tags:"ITSM" method:"post" summary:"继续 ITSM 工单对话" dc:"使用 query 返回的 checkpoint_id 和 interrupt_id 继续中断流程。补信息阶段传 answer；确认阶段传 confirmed，可选覆盖 subject/othersDesc。若 confirmed=true 且不传 subject、othersDesc，则表示直接确认当前草稿；若 confirmed=false，则表示取消提交。"`
-	UserID       string                   `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录人工号，请求头 X-User-ID" example:"122020255"`
+	UserID       string                   `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID；Lakeside 会在内部换取下游 ITSM 所需的员工编号" example:"122020255@link.cuhk.edu.cn"`
 	CheckpointID string                   `json:"checkpoint_id" v:"required" dc:"query 返回的流程快照 ID" example:"ckpt-b64cb049-85a8-433a-a5b7-fb5ad6d2b0f0"`
 	Targets      map[string]*ResumeTarget `json:"targets" v:"required" dc:"以 interrupt_id 为 key 的恢复输入集合，值为 ResumeTarget。补信息场景传 answer；确认场景传 confirmed，可选附带 subject、othersDesc。" example:"{\"6819cf6c-ea98-49d2-82b3-3e7cbcbc90b7\":{\"confirmed\":true,\"subject\":\"道扬书院C1010宿舍 WiFi故障\"}}"`
 }

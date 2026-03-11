@@ -1,208 +1,169 @@
-# Assistant Testing Guide
+# Lakeside Agent Testing Guide (Current Runtime)
 
-本文档整理了顶层 `IT 小助手` 的测试方法。测试时优先走：
+本文档对应当前 `run + worker + SSE` 架构。
 
-- `POST /v1/assistant/query`
-- `POST /v1/assistant/resume`
+主入口：
 
-旧的 `/v1/itsm/agent/*` 只作为子代理兼容入口，不再作为主测试路径。
+- `POST /v1/agent/{assistant_key}/runs`
+- `GET /v1/agent/{assistant_key}/runs/{run_id}`
+- `GET /v1/agent/{assistant_key}/runs/{run_id}/events`
+- `POST /v1/agent/{assistant_key}/runs/{run_id}/resume`
+- `POST /v1/agent/{assistant_key}/runs/{run_id}/cancel`
 
-## 启动服务
+默认约定：
+
+- `assistant_key=campus`
+- 请求头 `X-User-ID` 的值为 UPN
+- 服务地址 `http://127.0.0.1:8011`
+
+## 1. 前置检查
+
+1. Redis 可连接（本项目必需依赖）。
+2. `config/config.yaml` 至少配置：
+   - `agent.redis.*`
+   - `model.*`
+   - `agents.roots/domains/leaves`
+3. 可选：若要测知识检索，配置 `agents.rag.baseURL` 并确保 RAG 服务可用。
+
+## 2. 启动方式
+
+方式 A：单进程（推荐联调）
 
 ```bash
-gf run main.go
+MODE=all go run main.go
 ```
 
-默认服务地址：
-
-- `http://127.0.0.1:8011`
-- OpenAPI: `http://127.0.0.1:8011/api.json`
-- Swagger: `http://127.0.0.1:8011/swagger/`
-
-## 1. 发起建单对话
+方式 B：多进程（生产形态）
 
 ```bash
-curl -sS -m 240 -X POST http://127.0.0.1:8011/v1/assistant/query \
+# 终端1：仅 API
+MODE=api go run main.go
+
+# 终端2：仅 worker
+MODE=worker go run main.go
+```
+
+## 3. 基础流程（create -> events -> snapshot）
+
+创建 run：
+
+```bash
+curl -sS -X POST 'http://127.0.0.1:8011/v1/agent/campus/runs' \
   -H 'Content-Type: application/json' \
-  -H 'X-User-ID: 122020255' \
-  -d '{"message":"道扬书院C1010 WiFi坏了，帮我报修。"}'
+  -H 'X-User-ID: 122020255@link.cuhk.edu.cn' \
+  -d '{"message":"宿舍 WiFi 连接后无法上网，先给我排查建议，再帮我报修。"}'
 ```
 
-预期：
+记录返回中的 `run_id`。
 
-- `data.active_agent = "itsm"`
-- `data.status = "need_info"` 或 `need_confirm`
-- 返回 `session_id`
-- 返回 `checkpoint_id`
-- 返回 `interrupts[0].interrupt_id`
-
-## 2. 补充信息
-
-把上一步返回的 `session_id`、`checkpoint_id`、`interrupt_id` 带回去：
+订阅事件：
 
 ```bash
-curl -sS -m 240 -X POST http://127.0.0.1:8011/v1/assistant/resume \
-  -H 'Content-Type: application/json' \
-  -H 'X-User-ID: 122020255' \
-  -d '{
-    "session_id":"sess-xxx",
-    "checkpoint_id":"ckpt-xxx",
-    "targets":{
-      "interrupt-id-xxx":{
-        "answer":"服务级别填3。WiFi能连上但无法上网，宿舍里所有设备都受影响。"
-      }
-    }
-  }'
+curl -N -sS 'http://127.0.0.1:8011/v1/agent/campus/runs/<RUN_ID>/events' \
+  -H 'X-User-ID: 122020255@link.cuhk.edu.cn'
 ```
 
-预期：
-
-- `data.active_agent = "itsm"`
-- `data.status = "need_confirm"` 或 `done`
-
-## 3. 确认提交
+查询快照：
 
 ```bash
-curl -sS -m 240 -X POST http://127.0.0.1:8011/v1/assistant/resume \
-  -H 'Content-Type: application/json' \
-  -H 'X-User-ID: 122020255' \
-  -d '{
-    "session_id":"sess-xxx",
-    "checkpoint_id":"ckpt-xxx",
-    "targets":{
-      "interrupt-id-xxx":{
-        "confirmed":true
-      }
-    }
-  }'
+curl -sS 'http://127.0.0.1:8011/v1/agent/campus/runs/<RUN_ID>' \
+  -H 'X-User-ID: 122020255@link.cuhk.edu.cn'
 ```
 
-预期：
+期望：
 
-- `data.status = "done"`
-- `data.result.success = true`
-- `data.result.ticket_no` 有值
+- `run_status` 进入 `queued -> running -> waiting_input|done|failed|cancelled`
+- `waiting_input` 时有 `interrupts`
+- `done` 时有 `result`
+- SSE 终态事件与 `run_status` 对应：`run_waiting_input` / `run_completed` / `run_failed` / `run_cancelled`
 
-## 4. 取消提交
+## 4. resume 流程
+
+当 `run_status=waiting_input` 后，取 `interrupt_id` 调用：
 
 ```bash
-curl -sS -m 240 -X POST http://127.0.0.1:8011/v1/assistant/resume \
+curl -sS -X POST 'http://127.0.0.1:8011/v1/agent/campus/runs/<RUN_ID>/resume' \
   -H 'Content-Type: application/json' \
-  -H 'X-User-ID: 122020255' \
-  -d '{
-    "session_id":"sess-xxx",
-    "checkpoint_id":"ckpt-xxx",
-    "targets":{
-      "interrupt-id-xxx":{
-        "confirmed":false
-      }
-    }
-  }'
+  -H 'X-User-ID: 122020255@link.cuhk.edu.cn' \
+  -d '{"targets":{"<INTERRUPT_ID>":{"confirmed":true}}}'
 ```
 
-预期：
+期望：
 
-- `data.status = "done"`
-- `data.result.success = false`
+- 返回新的 `run_id`
+- 新 run 可继续 `events/snapshot`
 
-## 5. 测顶层 assistant 自己的回答
+## 5. cancel 流程
+
+取消接口：
 
 ```bash
-curl -sS -m 120 -X POST http://127.0.0.1:8011/v1/assistant/query \
+curl -sS -X POST 'http://127.0.0.1:8011/v1/agent/campus/runs/<RUN_ID>/cancel' \
   -H 'Content-Type: application/json' \
-  -H 'X-User-ID: 122020255' \
-  -d '{"message":"你现在支持哪些能力？"}'
+  -H 'X-User-ID: 122020255@link.cuhk.edu.cn' \
+  -d '{}'
 ```
 
-预期：
+期望：
 
-- `data.active_agent = "assistant"`
-- `data.status = "done"`
+- 返回 `data.result.cancelled=true`
+- 快照最终 `run_status=cancelled`
+- SSE 出现 `run_cancelled`
 
-## 6. 自动化测试
+说明：
 
-普通回归：
+- `queued` 可直接取消（数据库原子更新）
+- `running` 通过 Redis cancel 广播跨实例取消
+
+## 6. SSE 断线重连
+
+记录上次收到的事件 `id`，重连时可以传 `Last-Event-ID`（或 query 参数 `last_event_id`）：
+
+```bash
+curl -N -sS 'http://127.0.0.1:8011/v1/agent/campus/runs/<RUN_ID>/events' \
+  -H 'X-User-ID: 122020255@link.cuhk.edu.cn' \
+  -H 'Last-Event-ID: 12'
+```
+
+期望：服务会先补发 `id>12` 的历史事件，再继续实时推送。
+
+也可用 query 方式（便于某些网关或调试工具）：
+
+```bash
+curl -N -sS 'http://127.0.0.1:8011/v1/agent/campus/runs/<RUN_ID>/events?last_event_id=12' \
+  -H 'X-User-ID: 122020255@link.cuhk.edu.cn'
+```
+
+## 7. Redis Streams 可靠性检查
+
+查看队列与 pending：
+
+```bash
+redis-cli XINFO GROUPS lakeside:interactive:runtime:agent:runs:v1
+redis-cli XPENDING lakeside:interactive:runtime:agent:runs:v1 lakeside-agent-workers
+```
+
+期望：
+
+- 正常运行时，`pending` 会被 worker 持续清理
+- worker 重启后，pending 会被 `XAUTOCLAIM` 回收再处理
+
+语义说明：
+
+- 仅 handler 成功才 `XACK`
+- handler 失败不 `XACK`，消息保留 pending，后续可 reclaim
+
+## 8. 自动化测试
 
 ```bash
 go test ./...
 ```
 
-如果本地服务已经常驻在 `8011`，可以跑 live integration test：
+如需 live integration（依赖本地已启动服务与可用外部依赖）：
 
 ```bash
 LAKESIDE_RUN_LIVE_TESTS=1 \
-LAKESIDE_TEST_USER_ID=122020255 \
+LAKESIDE_TEST_ASSISTANT_KEY=campus \
+LAKESIDE_TEST_USER_ID=122020255@link.cuhk.edu.cn \
 go test ./test/integration -run Live -v
 ```
-
-如果要测 `resume`：
-
-```bash
-LAKESIDE_RUN_LIVE_TESTS=1 \
-LAKESIDE_TEST_USER_ID=122020255 \
-LAKESIDE_LIVE_RESUME_BODY='{"session_id":"sess-xxx","checkpoint_id":"ckpt-xxx","targets":{"interrupt-id":{"confirmed":true}}}' \
-go test ./test/integration -run Resume -v
-```
-
-## 7. 查看和清除长期记忆
-
-查看当前用户长期记忆：
-
-```bash
-curl -sS http://127.0.0.1:8011/v1/assistant/memories \
-  -H 'X-User-ID: 122020255'
-```
-
-按分类和键定向清除：
-
-```bash
-curl -sS -X POST http://127.0.0.1:8011/v1/assistant/memories/clear \
-  -H 'Content-Type: application/json' \
-  -H 'X-User-ID: 122020255' \
-  -d '{"category":"location","canonical_key":"dormitory_location"}'
-```
-
-清空当前用户全部长期记忆：
-
-```bash
-curl -sS -X POST http://127.0.0.1:8011/v1/assistant/memories/clear \
-  -H 'Content-Type: application/json' \
-  -H 'X-User-ID: 122020255' \
-  -d '{}'
-```
-
-如果要直接查 SQLite：
-
-```bash
-sqlite3 runtime/assistant.db "select id,user_code,category,canonical_key,content,confidence,status from assistant_memories order by id desc;"
-```
-
-## 8. ITSM 相似问题聚合与 P1 升级
-
-这一层主要靠单元测试验证：
-
-```bash
-go test ./internal/service/itsmagent -run 'Signal|Promote|Normalize' -v
-go test ./internal/service/embeddings -v
-go test ./internal/consts -v
-```
-
-覆盖点：
-- Redis key 是否符合新的全局命名空间
-- embedding cache key 是否带上 provider 和 model
-- 事件规范化是否能抽出 `domain/object/symptom/scope/locationScope`
-- `serviceLevel=2/3` 是否会在满足门槛时升级到 `1`
-- `serviceLevel=4` 是否不会被误升
-
-## 9. 日志观察点
-
-出现慢响应时，优先看这些日志：
-
-- `assistant query started`
-- `assistant resume started`
-- `assistant agent callback start/end`
-- `itsm extractor started`
-- `itsm signal escalation triggered`
-- `assistant query completed`
-
-如果 `curl` 自己超时，服务端通常会看到 `context canceled`，这表示客户端先断开了，不一定是服务端崩了。

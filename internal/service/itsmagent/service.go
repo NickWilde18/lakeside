@@ -15,6 +15,7 @@ import (
 	"lakeside/api/itsm/v1"
 	"lakeside/internal/consts"
 	"lakeside/internal/infra/rediskit"
+	"lakeside/internal/infra/uniauth"
 	"lakeside/internal/service/embeddings"
 	"lakeside/internal/service/itsmclient"
 )
@@ -54,9 +55,13 @@ func newService(ctx context.Context) *Service {
 		MaxAttempts: g.Cfg().MustGet(ctx, "itsm.retry.maxAttempts", 3).Int(),
 		Backoffs:    parseBackoffConfig(g.Cfg().MustGet(ctx, "itsm.retry.backoffMs", []int{1000, 2000, 4000}).Ints()),
 	})
+	uniauthClient := uniauth.NewClient(uniauth.Config{
+		BaseURL: g.Cfg().MustGet(ctx, "uniauth.baseURL").String(),
+		Timeout: time.Duration(g.Cfg().MustGet(ctx, "uniauth.timeoutMs", 5000).Int()) * time.Millisecond,
+	})
 
 	signalService := newSignalService(ctx, embeddings.GetService(ctx))
-	agent := NewTicketCreateAgent(NewExtractor(), itsm, idemStore, signalService, cfg)
+	agent := NewTicketCreateAgent(NewExtractor(), itsm, uniauthClient, idemStore, signalService, cfg)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:           agent,
 		EnableStreaming: false,
@@ -105,14 +110,14 @@ func (s *Service) Query(ctx context.Context, req *QueryRequest) (*v1.AgentRespon
 		return errorResponse("", "missing header X-User-ID"), nil
 	}
 	if strings.TrimSpace(req.Message) == "" {
-		g.Log().Warningf(ctx, "itsm query rejected: empty message, user_code=%s", req.UserCode)
+		g.Log().Warningf(ctx, "itsm query rejected: empty message, user_upn=%s", req.UserCode)
 		return errorResponse("", "message is empty"), nil
 	}
 
 	sessionID := "sess-" + uuid.NewString()
 	// checkpoint_id 每轮 Query 唯一，用于后续 Resume 精准接续到中断点。
 	checkpointID := genCheckpointID()
-	g.Log().Infof(ctx, "itsm query started, user_code=%s session_id=%s checkpoint_id=%s", req.UserCode, sessionID, checkpointID)
+	g.Log().Infof(ctx, "itsm query started, user_upn=%s session_id=%s checkpoint_id=%s", req.UserCode, sessionID, checkpointID)
 
 	iter := s.runner.Query(ctx, req.Message,
 		adk.WithCheckPointID(checkpointID),
@@ -120,6 +125,7 @@ func (s *Service) Query(ctx context.Context, req *QueryRequest) (*v1.AgentRespon
 			// 这些 session values 会透传到 agent.Run/Resume，用于身份、会话和幂等控制。
 			"session_id":        sessionID,
 			"checkpoint_id":     checkpointID,
+			"user_upn":          strings.TrimSpace(req.UserCode),
 			"user_code":         strings.TrimSpace(req.UserCode),
 			"assistant_context": strings.TrimSpace(req.AssistantContext),
 		}),
@@ -135,16 +141,16 @@ func (s *Service) Resume(ctx context.Context, req *ResumeRequest) (*v1.AgentResp
 		return errorResponse("", "missing header X-User-ID"), nil
 	}
 	if strings.TrimSpace(req.CheckpointID) == "" {
-		g.Log().Warningf(ctx, "itsm resume rejected: missing checkpoint_id, user_code=%s", req.UserCode)
+		g.Log().Warningf(ctx, "itsm resume rejected: missing checkpoint_id, user_upn=%s", req.UserCode)
 		return errorResponse("", "checkpoint_id is required"), nil
 	}
 	if len(req.Targets) == 0 {
-		g.Log().Warningf(ctx, "itsm resume rejected: empty targets, user_code=%s checkpoint_id=%s", req.UserCode, req.CheckpointID)
+		g.Log().Warningf(ctx, "itsm resume rejected: empty targets, user_upn=%s checkpoint_id=%s", req.UserCode, req.CheckpointID)
 		return errorResponse("", "targets is required"), nil
 	}
 
 	sessionID := "sess-" + uuid.NewString()
-	g.Log().Infof(ctx, "itsm resume started, user_code=%s session_id=%s checkpoint_id=%s raw_target_count=%d", req.UserCode, sessionID, req.CheckpointID, len(req.Targets))
+	g.Log().Infof(ctx, "itsm resume started, user_upn=%s session_id=%s checkpoint_id=%s raw_target_count=%d", req.UserCode, sessionID, req.CheckpointID, len(req.Targets))
 
 	targets := make(g.Map, len(req.Targets))
 	// 按 interrupt_id 回填对应的恢复负载，让 ADK 只恢复用户确认的中断点。
@@ -165,7 +171,7 @@ func (s *Service) Resume(ctx context.Context, req *ResumeRequest) (*v1.AgentResp
 	}
 
 	if len(targets) == 0 {
-		g.Log().Warningf(ctx, "itsm resume rejected: no valid targets, user_code=%s checkpoint_id=%s", req.UserCode, req.CheckpointID)
+		g.Log().Warningf(ctx, "itsm resume rejected: no valid targets, user_upn=%s checkpoint_id=%s", req.UserCode, req.CheckpointID)
 		return errorResponse(sessionID, "targets has no valid resume payload"), nil
 	}
 	g.Log().Infof(ctx, "itsm resume targets built, checkpoint_id=%s valid_target_count=%d", req.CheckpointID, len(targets))
@@ -174,6 +180,7 @@ func (s *Service) Resume(ctx context.Context, req *ResumeRequest) (*v1.AgentResp
 		adk.WithSessionValues(g.Map{
 			"session_id":        sessionID,
 			"checkpoint_id":     req.CheckpointID,
+			"user_upn":          strings.TrimSpace(req.UserCode),
 			"user_code":         strings.TrimSpace(req.UserCode),
 			"assistant_context": strings.TrimSpace(req.AssistantContext),
 		}),

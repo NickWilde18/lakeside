@@ -33,6 +33,7 @@ type TicketCreateAgent struct {
 	description       string
 	extractor         *Extractor
 	itsmClient        *itsmclient.Client
+	identityResolver  employeeIDResolver
 	idempotencyStore  idempotencyStore
 	signalService     *signalService
 	enumThreshold     float64
@@ -42,13 +43,13 @@ type TicketCreateAgent struct {
 
 // NewTicketCreateAgent 构造 ITSM 建单业务状态机。
 //
-// 参数说明：
-//   - extractor: 负责从用户输入抽取工单草稿字段，并生成补充提问建议。
-//   - itsmClient: 负责调用下游 ITSM 接口提交工单。
-//   - idemStore: 负责保存/读取提交幂等结果，避免重复建单。
-//   - signalService: 负责相似问题聚合与服务级别自动升级；为 nil 时关闭该能力。
-//   - cfg: 运行配置，包含枚举置信度阈值与幂等 TTL 等。
-func NewTicketCreateAgent(extractor *Extractor, itsmClient *itsmclient.Client, idemStore idempotencyStore, signalService *signalService, cfg serviceConfig) *TicketCreateAgent {
+// extractor 负责从用户输入抽取工单草稿字段，并生成补充提问建议。
+// itsmClient 负责调用下游 ITSM 接口提交工单。
+// identityResolver 负责把入站 UPN 解析为下游 ITSM 需要的 employeeId。
+// idemStore 负责保存和读取提交幂等结果，避免重复建单。
+// signalService 负责相似问题聚合与服务级别自动升级；为 nil 时关闭该能力。
+// cfg 提供枚举置信度阈值与幂等 TTL 等运行配置。
+func NewTicketCreateAgent(extractor *Extractor, itsmClient *itsmclient.Client, identityResolver employeeIDResolver, idemStore idempotencyStore, signalService *signalService, cfg serviceConfig) *TicketCreateAgent {
 	threshold := cfg.EnumConfidenceThreshold
 	if threshold <= 0 {
 		threshold = 0.75
@@ -58,6 +59,7 @@ func NewTicketCreateAgent(extractor *Extractor, itsmClient *itsmclient.Client, i
 		description:       "Extract ITSM fields, interrupt for missing info and confirmation, then create ticket",
 		extractor:         extractor,
 		itsmClient:        itsmClient,
+		identityResolver:  identityResolver,
 		idempotencyStore:  idemStore,
 		signalService:     signalService,
 		enumThreshold:     threshold,
@@ -76,23 +78,32 @@ func (a *TicketCreateAgent) Description(_ context.Context) string {
 
 func (a *TicketCreateAgent) Run(ctx context.Context, input *adk.AgentInput, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	startedAt := time.Now()
-	// user_code 由 service 层在 Query/Resume 时写入 session values，这里直接读取即可。
-	userCode := strings.TrimSpace(sessionString(ctx, "user_code"))
-	if userCode == "" {
+	userUPN := strings.TrimSpace(sessionString(ctx, "user_upn"))
+	if userUPN == "" {
+		userUPN = strings.TrimSpace(sessionString(ctx, "user_code"))
+	}
+	if userUPN == "" {
 		return singleEventIter(&adk.AgentEvent{Err: fmt.Errorf("missing X-User-ID")})
 	}
 
-	// ADK 输入里可能包含多轮消息，实际只取最后一条 user message 作为本轮抽取材料。
-	message := latestUserMessage(input)
+	// 顶层平台会把本轮原始用户输入显式放进 session，优先使用它，避免嵌套 agent 传递时被历史消息稀释。
+	message := sessionString(ctx, "latest_user_message")
+	if message == "" {
+		// 兼容非平台直连场景，例如叶子 agent 单独调试时仍从 ADK 输入中兜底取最后一条 user message。
+		message = latestUserMessage(input)
+	}
 	if strings.TrimSpace(message) == "" {
 		return singleEventIter(&adk.AgentEvent{Err: fmt.Errorf("empty user message")})
 	}
 
 	// 固定提示文案目前按“中文 / 非中文”两类切换。
 	lang := detectUserLanguage(message)
+	userCode, err := a.resolveEmployeeID(ctx, userUPN)
+	if err != nil {
+		return singleEventIter(&adk.AgentEvent{Err: err})
+	}
 	draft := TicketDraft{UserCode: userCode}
 
-	var err error
 	var clarify string
 	assistantContext := sessionString(ctx, "assistant_context")
 	// 第一步先让 extractor 尝试从用户原话中补齐草稿。
@@ -410,6 +421,25 @@ func sessionString(ctx context.Context, key string) string {
 	}
 	s, _ := v.(string)
 	return strings.TrimSpace(s)
+}
+
+func (a *TicketCreateAgent) resolveEmployeeID(ctx context.Context, userUPN string) (string, error) {
+	if a == nil || a.identityResolver == nil {
+		return "", fmt.Errorf("uniauth resolver is not configured")
+	}
+	userUPN = strings.TrimSpace(userUPN)
+	if userUPN == "" {
+		return "", fmt.Errorf("missing X-User-ID")
+	}
+	employeeID, err := a.identityResolver.ResolveEmployeeID(ctx, userUPN)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve employeeId from UPN %s: %w", userUPN, err)
+	}
+	employeeID = strings.TrimSpace(employeeID)
+	if employeeID == "" {
+		return "", fmt.Errorf("employeeId is empty for UPN %s", userUPN)
+	}
+	return employeeID, nil
 }
 
 func validEnumValue(v string) bool {

@@ -5,7 +5,11 @@
 - `config/`: runtime config (`config.yaml`).
 - `api/`: GoFrame API contracts (Req/Res + route metadata). Versioned under `api/*/v1`.
 - `internal/controller/`: HTTP handlers. Follow project rule: **one handler per file**.
-- `internal/service/`: business services (e.g., `itsmagent`, `itsmclient`, `chatmodels`).
+- `internal/service/agentplatform/`: 通用 agent 平台层（registry/runtime/session/response/memory）。
+- `internal/service/rootassistant/`: 顶层助手，例如 `campus`、后续的 `coding`。
+- `internal/service/domainassistant/`: 领域助手，例如 `it`、后续的 `hr`、`osa`。
+- `internal/service/leafagent/`: 叶子 agent，例如 `itsm`、`knowledge`。
+- `internal/service/`: 其他业务或基础服务，例如 `itsmagent`, `itsmclient`, `chatmodels`。
 - `internal/cmd/`: server bootstrap and route binding.
 - `manifest/`, `hack/`, `resource/`: deployment scripts, codegen/build helpers, static assets.
 
@@ -27,6 +31,13 @@
 - Do not hand-write controller skeletons. Define API first, then run `gf gen ctrl`.
 - Controller methods should match generated interface names (for example `AgentQuery`, `AgentResume`).
 - During collaboration, if new global requirements or coding conventions are agreed in chat, update `AGENTS.md` immediately so rules stay source-of-truth.
+- 顶层 IT 助手下的各类子代理（例如 `itsm`、knowledge subagents）是同级关系；不要把知识检索能力嵌套进 ITSM 子代理内部。
+- 对外请求头 `X-User-ID` 保持不变，但其值语义统一为 UPN；如某个下游系统要求员工编号等其他身份字段，应在服务端内部转换，不要要求前端改传别的 header。
+- 顶层/领域助手的路由提示词模板应通过 `agents.roots[].instructionTemplate`、`agents.domains[].instructionTemplate` 配置，不要把这类路由策略硬编码在 Go 代码里；字段说明写在 `config/config.example.yaml`。
+- 顶层/领域层编排优先使用 Eino 官方组件，当前统一使用 `adk/prebuilt/supervisor`；只有官方没有现成能力时才加薄适配层。
+- knowledge 叶子 agent 不得靠硬编码“一轮只检索一次”来限制检索；如需扩召回，优先使用 Eino 官方检索组件，例如 `flow/retriever/multiquery`。
+- 未来 agent 体系按分层组织：`顶层助手 -> 领域助手 -> 叶子 agent`。目录设计应优先体现这三层结构，不再继续把所有 agent 平铺在 `internal/service` 根下。
+- 主产品入口统一使用 `/v1/agent/{assistant_key}/*`；旧 `/v1/assistant/*` 不再保留。
 
 ## Testing Guidelines
 - Use Go `testing` package; `testify/require` is allowed and already used in this repo for concise assertions.

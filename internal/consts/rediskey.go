@@ -1,6 +1,10 @@
 package consts
 
 const (
+	// RootAssistantCheckpointPrefix 是顶层助手 checkpoint 前缀。
+	//   每个顶层助手都会在此基础上继续拼接 assistant_key，形成独立 checkpoint 命名空间。
+	RootAssistantCheckpointPrefix = "lakeside:interactive:rootassistant:checkpoint:v1:"
+
 	// AssistantCheckpointPrefix 是 IT 主助手 checkpoint 前缀。
 	//   主助手（assistant host）保存 checkpoint 的默认前缀。
 	AssistantCheckpointPrefix = "lakeside:interactive:it:host:main:checkpoint:v1:"

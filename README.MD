@@ -1,576 +1,230 @@
 # Lakeside
 
-本仓库基于 GoFrame，当前核心业务是一个校园 `IT 小助手`，其中 `itsm agent` 作为第一个 subagent 负责工单建单流程。
+Lakeside 现在是一个多层 Agent 平台，而不是单一的 IT 助手服务。
 
-Quick Start:
-- https://goframe.org/quick
+当前已落地的树形结构：
 
-配置说明：
-- 运行时配置文件：`config/config.yaml`
-- 注释版配置示例：`config/config.example.yaml`
-- 启动时会执行强类型配置校验，校验逻辑见 [config_validate.go](/home/nickw/lakeside/internal/cmd/config_validate.go)
+- 顶层助手：`campus`
+- 领域助手：`it`
+- 叶子 agent：`itsm`、`campus_it_kb`、`campus_it_kb_for_itso_student_assistant`
 
-## IT Assistant 概览
+主入口统一为：
 
-当前顶层 `IT 小助手` 已接入：
-- 顶层接口：`/v1/assistant/query`、`/v1/assistant/resume`
-- 第一个 subagent：`itsm`
-- 顶层执行器：Eino ADK `ChatModelAgent`
-- 官方 middleware：`Summarization`、`PatchToolCalls`
-- 会话消息原文存储
-- ADK checkpoint 持久化
-- 异步长期记忆提取
-- OpenRouter embedding + Eino cache embedding
-- ITSM 相似问题聚合与服务级别自动升级
+- `POST /v1/agent/{assistant_key}/runs`
+- `GET /v1/agent/{assistant_key}/runs/{run_id}`
+- `GET /v1/agent/{assistant_key}/runs/{run_id}/events`
+- `POST /v1/agent/{assistant_key}/runs/{run_id}/resume`
+- `POST /v1/agent/{assistant_key}/runs/{run_id}/cancel`
+- `GET /v1/agent/{assistant_key}/memories`
+- `POST /v1/agent/{assistant_key}/memories/clear`
 
-当前顶层流程是：
-1. 记录用户消息
-2. 读取用户长期记忆并组装 `assistant_context`
-3. 顶层 `ChatModelAgent` 决定直接回复还是调用 `itsm` subagent
-4. `Summarization Middleware` 在上下文过长时自动压缩历史
-5. `PatchToolCalls Middleware` 在 resume 前修补悬空 tool call
-6. 保存 assistant 可见回复
-7. 异步提取长期记忆
+当前仍保留 `/v1/itsm/agent/*` 作为叶子 agent 调试入口，不再作为主产品入口。
 
-当前持久化内容包括：
-- `assistant_sessions`
-- `assistant_messages`
-- `assistant_memories`
+## 架构分层
 
-当前 Redis 资源统一按命名空间组织：
-- agent 自有状态：`lakeside:{plane}:{scope_path}:{agent_kind}:{agent_name}:...:v1:*`
-- 共享基础设施：`lakeside:shared:{component}:...:v1:*`
+- `internal/service/agentplatform/`
+  - 通用平台层：registry、runtime、checkpoint、session、memory、response
+- `internal/service/rootassistant/`
+  - 顶层助手，例如 `campus`；当前统一使用 Eino 官方 `adk/prebuilt/supervisor`
+- `internal/service/domainassistant/`
+  - 领域助手，例如 `it`；当前统一使用 Eino 官方 `adk/prebuilt/supervisor`
+- `internal/service/leafagent/`
+  - 叶子 agent，目前包括 `itsm` 与 `knowledge`
+- `internal/infra/`
+  - 外部依赖适配层，例如 `ragclient`、`uniauth`、`rediskit`
 
-当前已落地的 key 前缀包括：
-- `lakeside:interactive:it:host:main:checkpoint:v1:`
-- `lakeside:interactive:it:subagent:itsm:checkpoint:v1:`
-- `lakeside:interactive:it:subagent:itsm:idempotency:v1:`
-- `lakeside:shared:embedding:cache:v1:`
+## 当前行为
 
-`assistant_summaries` 表暂时保留，但当前主链路优先使用 ADK `Summarization Middleware` 做上下文压缩，不再在请求链路中手写滚动摘要。
+一次 run 允许出现多个 step。例如：
 
-长期记忆调试接口：
-- `GET /v1/assistant/memories`：查看当前用户长期记忆
-- `POST /v1/assistant/memories/clear`：清除当前用户长期记忆
+1. 先调用 knowledge 叶子 agent 返回排查建议
+2. 再调用 `itsm` 进入 `need_info` 或 `need_confirm`
 
-注意：
-- 当前 `assistant_context` 只会注入 `assistant_memories`，不会注入 `assistant_summaries`
-- 如果助手在新会话里“知道”了宿舍位置、偏好老师等信息，优先去查 `assistant_memories`
+因此顶层响应不再只表达“命中了哪个 agent”，而是表达：
 
-首期开发版使用 SQLite 持久化仓储，结构设计按后续切换 MSSQL 兼容来约束。
+- `assistant_key`
+- `active_path`
+- `steps[]`
+- `interrupts[]`
+- `result`
+- `run_status`
 
-## 长期记忆设计
+其中：
 
-当前长期记忆的目标不是保存所有聊天内容，而是提取“跨会话仍然有价值”的稳定事实，例如：
-- 用户常用地点
-- 用户身份补充信息
-- 用户偏好语言
-- 用户偏好对接老师
-- 常见设备信息
+- `steps[]` 用于展示本轮依次发生了什么
+- `result.sources[]` 用于返回知识来源，包含 `filename`、`doc_id`、`node_id`、`snippet`、`score`
+- `interrupts[]` 当前主要来自 `itsm` 叶子 agent
+- `run_status` 用于表达运行态，例如 `queued`、`running`、`waiting_input`、`done`
 
-### 1. 原始消息如何保存
+## 配置
 
-每轮对话的可见消息会先进入 `assistant_messages`：
-- 用户输入
-- assistant 回复
-- interrupt prompt
+运行时读取：
 
-这层是原始记录和审计基础，也是长期记忆提取的输入来源。
+- `config/config.yaml`
 
-### 2. 长期记忆如何提取
+注释示例：
 
-当前实现位于：
-- [memory.go](/home/nickw/lakeside/internal/service/assistant/memory.go)
+- `config/config.example.yaml`
 
-流程是：
-1. 每轮 assistant 响应完成后，异步投递一个 memory job
-2. worker 读取该会话最近消息 + 当前已存在的长期记忆
-3. 调模型提取稳定事实
-4. 以 `(user_code, category, canonical_key)` 为唯一键 upsert 到 `assistant_memories`
+当前配置已经切到树形：
 
-当前支持的 category：
-- `identity`
-- `role`
-- `location`
-- `preference`
-- `relationship`
-- `device`
-- `habit`
-- `contact`
+- `agents.roots[]`
+- `agents.domains[]`
+- `agents.leaves[]`
 
-### 3. 长期记忆如何参与后续对话
+根/领域助手的路由提示词模板也都在配置里：
 
-当前实现位于：
-- [service.go](/home/nickw/lakeside/internal/service/assistant/service.go#L334)
+- `agents.roots[].instructionTemplate`
+- `agents.domains[].instructionTemplate`
 
-`query` / `resume` 前，会读取当前用户的长期记忆并拼成：
+运行时会把这些占位符替换成当前会话值：
 
-```text
-当前用户工号：xxx
-长期记忆：[category/canonical_key] content；...
+- `{assistant_key}`
+- `{user_upn}`
+- `{assistant_context}`
+- `{latest_user_message}`
+- `{child_catalog}`
+
+## 持久化
+
+SQLite：
+
+- `agent_sessions`
+- `agent_messages`
+- `agent_memories`
+- `agent_runs`
+- `agent_run_events`
+
+Redis：
+
+- 顶层助手 checkpoint：`lakeside:interactive:rootassistant:checkpoint:v1:`
+- ITSM checkpoint：`lakeside:interactive:it:subagent:itsm:checkpoint:v1:`
+- ITSM 幂等：`lakeside:interactive:it:subagent:itsm:idempotency:v1:`
+- 共享 embedding cache：`lakeside:shared:embedding:cache:v1:`
+- run 队列（Streams）：`agents.runtime.streamKey`（默认 `lakeside:interactive:runtime:agent:runs:v1`）
+- run 事件唤醒（Pub/Sub）：`agents.runtime.pubsubChannel`
+- run 取消广播（Pub/Sub）：`agents.runtime.pubsubChannel + ":cancel"`
+
+Redis 在本仓库中是必需依赖。
+
+## SSE 运行时
+
+顶层入口已经切到 `run + snapshot + SSE events`：
+
+1. `POST /v1/agent/{assistant_key}/runs`
+   - 立即返回 `run_id`、`session_id`
+   - run 会进入 Redis Streams 队列，由 worker 异步消费
+2. `GET /v1/agent/{assistant_key}/runs/{run_id}/events`
+   - 返回 `text/event-stream`
+   - 支持 `Last-Event-ID`
+   - 先回放 DB 事件，再结合本机订阅 + Redis Pub/Sub 推送后续事件
+3. `GET /v1/agent/{assistant_key}/runs/{run_id}`
+   - 返回当前快照
+4. `POST /v1/agent/{assistant_key}/runs/{run_id}/resume`
+   - 继续 `waiting_input` 的运行
+5. `POST /v1/agent/{assistant_key}/runs/{run_id}/cancel`
+   - 取消长任务
+   - `queued` 可直接取消
+   - `running` 通过 Redis cancel 广播跨实例通知 worker 取消
+
+当前已实现的结构化事件包括：
+
+- `run_started`
+- `run_waiting_input`
+- `agent_entered`
+- `agent_completed`
+- `knowledge_retrieve_started`
+- `knowledge_retrieve_finished`
+- `knowledge_answer_ready`
+- `itsm_interrupt_emitted`
+- `itsm_done`
+- `run_completed`
+- `run_failed`
+- `run_cancelled`
+
+队列可靠性语义：
+
+- worker 仅在 handler 成功后 `XACK`，失败消息会保留 pending
+- worker 启动后会通过 `XAUTOCLAIM` 回收 pending，避免崩溃后消息遗失
+- `TryStartRun` 保证同一个 run 只会被一个 worker 原子抢占执行
+
+## 身份语义
+
+对外请求头仍然叫：
+
+- `X-User-ID`
+
+但其值语义统一为：
+
+- `UPN`
+
+当前落地方式：
+
+- 调知识库 RAG 时，把 `X-User-ID` 透传为 `x-user-upn`
+- 调 ITSM 前，通过 `UniAuth` 把 UPN 换成下游需要的 `employeeId`
+
+## 知识库接入
+
+Lakeside 不负责知识库管理，只复用独立 RAG 服务的检索接口：
+
+- `POST /v1/retrieve`
+- `POST /v1/documents/batch_get`
+
+knowledge 叶子 agent 负责：
+
+1. 按固定 `kb_id` 或 `kb_id[]` 检索
+2. 使用 Eino 官方 `flow/retriever/multiquery` 做查询改写与扩召回
+3. 补齐文件名
+4. 基于检索片段生成回答
+5. 返回来源与 `snippet`
+
+知识库上传、重建索引、权限同步仍然在独立 RAG 服务里完成，不在 Lakeside 内实现。
+
+## ITSM 接入
+
+`itsm` 叶子 agent 保留当前自定义可中断状态机：
+
+1. 抽取草稿
+2. 缺信息时 interrupt
+3. 二次确认时 interrupt
+4. 用户确认后提交下游 ITSM
+
+当前也保留：
+
+- 提交幂等保护
+- 相似问题聚合与服务级别升级
+
+## 启动
+
+```bash
+go run main.go
 ```
 
-然后作为 `assistant_context` 注入顶层 assistant 与 itsm subagent。
+运行模式（可通过环境变量 `MODE` 或 `server.mode` 指定）：
 
-注意：
-- 当前是“全部 active memories 直接注入”
-- 不区分“强记忆 / 弱记忆”
-- 不做按场景筛选
+- `all`：HTTP + worker（默认）
+- `api`：仅 HTTP
+- `worker`：仅 worker
 
-所以如果库里已经有 `location/dormitory_location -> 用户住在道扬书院C1010`，那么用户下一次只说“寝室 WiFi 坏了”，模型也可能直接带上 `道扬书院C1010`。
+默认地址：
 
-### 4. 如何查看和清除长期记忆
+- `http://127.0.0.1:8011`
+- OpenAPI: `http://127.0.0.1:8011/api.json`
+- Swagger: `http://127.0.0.1:8011/swagger/`
 
-接口：
-- `GET /v1/assistant/memories`
-- `POST /v1/assistant/memories/clear`
+## 测试
 
-用途：
-- 查看当前用户有哪些长期记忆被注入
-- 定向删除一条记忆
-- 清空当前用户全部长期记忆
+单元测试：
 
-测试示例见：
+```bash
+go test ./...
+```
+
+联调说明见：
+
 - [TESTING.md](/home/nickw/lakeside/TESTING.md)
 
-### 5. 当前限制
+设计文档见：
 
-当前长期记忆方案还比较直接，后续建议继续做：
-- 记忆分类分级，避免所有记忆无条件注入
-- 增加“仅在相关场景注入”的策略
-- 增加用户纠错和人工审核机制
-- 增加记忆置信度阈值和过期策略
-
-## 测试说明
-
-- 日常回归：`go test ./...`
-- 顶层 assistant 的单元测试位于 `internal/service/assistant`
-- 可选 live 联调测试位于 `test/integration`
-- 当本地服务运行在 `127.0.0.1:8011` 时，可直接执行：
-
-```bash
-LAKESIDE_RUN_LIVE_TESTS=1 \
-LAKESIDE_TEST_USER_ID=122020255 \
-go test ./test/integration -run Live -v
-```
-
-- 若要测试 `resume`，可额外传入完整请求体：
-
-```bash
-LAKESIDE_RUN_LIVE_TESTS=1 \
-LAKESIDE_TEST_USER_ID=122020255 \
-LAKESIDE_LIVE_RESUME_BODY='{"session_id":"sess-xxx","checkpoint_id":"ckpt-xxx","targets":{"interrupt-id":{"confirmed":true}}}' \
-go test ./test/integration -run Resume -v
-```
-
-## ITSM Agent 概览
-
-当前 ITSM agent 的目标是：
-- 从用户自然语言中抽取工单字段
-- 信息不完整时中断并追问用户
-- 信息齐全后让用户二次确认
-- 用户确认后调用下游 ITSM API 创建工单
-- 对重复确认做幂等保护
-
-当前流程分两层：
-1. 模型负责抽取字段，并在不确定时给出补充提问建议。
-2. Go 代码负责判断字段是否已经完整，决定是继续追问还是进入确认阶段。
-
-也就是说，是否“信息完整”不是完全由模型自由决定，而是以服务端代码中的规则为准。
-
-## ITSM 相似问题聚合与服务级别升级
-
-当前 ITSM 提交前新增了一层“相似问题聚合”：
-1. 根据 `subject + othersDesc + priority` 规范化出事件字段
-2. 用 OpenRouter `qwen/qwen3-embedding-8b` 生成 embedding
-3. 通过 Eino `cache embedding` 把重复文本的 embedding 缓存在 Redis
-4. 把最近 10 分钟的同类事件从 Redis 取回，在应用侧做余弦相似度比对并归簇
-5. 如果当前工单原始 `serviceLevel` 为 `2` 或 `3`，且同一相似簇里最近 10 分钟已有至少 5 个不同用户，影响范围达到楼宇/区域级，则只把当前新工单升级为 `1`
-
-说明：
-- 这层升级只影响新提交工单，不回写已创建工单
-- 当前只对 `priority=3` 的故障类工单启用
-- `itsm.signal.enabled=false` 或 embedding 不可用时，会跳过升级，不阻塞建单
-- 模型 prompt 只负责给出默认 `3`、多人同类问题 `2`、用户明确描述大范围故障时 `1`
-- “跨用户聚合后升到 1” 是服务端后处理，不由模型自行猜测
-
-## 调用链总览
-
-从 HTTP 请求到工单创建，主链路如下：
-
-1. 前端调用 `POST /v1/itsm/agent/query`
-2. controller 把请求转换为 `itsmagent.QueryRequest`
-3. `Service.Query` 创建 `session_id` 和 `checkpoint_id`
-4. `Service.Query` 调用 `adk.Runner.Query`
-5. `TicketCreateAgent.Run` 调用 `Extractor.FillDraft`
-6. `Extractor.FillDraft` 调用模型抽取字段
-7. `TicketCreateAgent.needInfoInterrupt` 判断是否缺信息
-8. 如果缺信息，ADK 返回 interrupt，API 响应 `need_info`
-9. 如果信息齐全，`TicketCreateAgent.buildConfirmInterrupt` 返回确认 interrupt，API 响应 `need_confirm`
-10. 前端调用 `POST /v1/itsm/agent/resume`
-11. controller 把 `targets` 转成 `ResumeRequest`
-12. `Service.Resume` 调用 `adk.Runner.ResumeWithParams`
-13. `TicketCreateAgent.Resume`
-14. `collect` 阶段继续补信息；`confirm` 阶段确认后调用 `submitTicket`
-15. `submitTicket` 调用下游 ITSM API
-16. `Service.consumeIterator` 把 ADK 结果转换为最终 API 响应 `done`
-
-```mermaid
-flowchart TD
-    A[前端调用 query] --> B[controller: AgentQuery]
-    B --> C[Service.Query]
-    C --> D[adk.Runner.Query]
-    D --> E[TicketCreateAgent.Run]
-    E --> F[Extractor.FillDraft]
-    F --> G[模型抽取字段]
-    G --> H{needInfoInterrupt\n信息是否完整}
-    H -->|否| I[返回 need_info interrupt]
-    H -->|是| J[返回 need_confirm interrupt]
-    I --> K[前端调用 resume]
-    J --> K
-    K --> L[controller: AgentResume]
-    L --> M[Service.Resume]
-    M --> N[adk.Runner.ResumeWithParams]
-    N --> O[TicketCreateAgent.Resume]
-    O --> P{当前阶段}
-    P -->|collect| Q[继续补信息并再次判断]
-    P -->|confirm| R[submitTicket]
-    R --> S[ITSM API]
-    S --> T[Service.consumeIterator]
-    T --> U[返回 done]
-```
-
-```mermaid
-stateDiagram-v2
-    [*] --> collect: query 后信息不完整
-    [*] --> confirm: query 后信息完整
-    collect --> collect: resume 补充后仍缺字段
-    collect --> confirm: resume 补充后信息齐全
-    confirm --> done: confirmed=true, submitTicket
-    confirm --> done: confirmed=false, cancel
-```
-
-```mermaid
-classDiagram
-    class TicketDraft {
-        +string UserCode
-        +string Subject
-        +string ServiceLevel
-        +string Priority
-        +string OthersDesc
-    }
-
-    class ExtractResult {
-        +string Subject
-        +string OthersDesc
-        +string ServiceLevel
-        +float64 ServiceLevelConfidence
-        +string Priority
-        +float64 PriorityConfidence
-        +string ClarifyQuestion
-    }
-
-    class TicketInterruptInfo {
-        +string Type
-        +string Prompt
-        +string Language
-        +[]string MissingFields
-        +[]string EditableFields
-        +[]string ReadonlyFields
-        +TicketDraft Draft
-    }
-
-    class TicketAgentState {
-        +string Stage
-        +string Language
-        +TicketDraft Draft
-        +TicketInterruptInfo Pending
-    }
-
-    class AgentResponse {
-        +string Status
-        +string SessionID
-        +string CheckpointID
-        +[]AgentInterrupt Interrupts
-        +AgentResult Result
-    }
-
-    ExtractResult --> TicketDraft : FillDraft合并结果
-    TicketDraft --> TicketInterruptInfo : 生成中断草稿
-    TicketInterruptInfo --> TicketAgentState : 作为Pending持久化
-    TicketAgentState --> AgentResponse : Resume/Query后转成API响应
-```
-
-## 代码职责划分
-
-### `internal/service/itsmagent/service.go`
-
-这一层是 API 与 ADK 之间的编排层，主要负责：
-- 初始化 `Runner`
-- 生成 `session_id` / `checkpoint_id`
-- 组织 `ResumeParams.Targets`
-- 消费 ADK 事件流并转成接口响应
-- 管理 checkpoint 生命周期
-
-如果你想查接口为什么返回 `need_info / need_confirm / done`，先看这里。
-
-### `internal/service/itsmagent/agent.go`
-
-这一层是业务状态机，主要负责：
-- 首次运行 `Run`
-- 中断后恢复 `Resume`
-- 判断信息是否完整
-- 构造中断提示
-- 调用工单系统提交
-- 处理幂等
-
-如果你想改流程阶段、补信息规则、确认规则、提交时机，主要看这里。
-
-### `internal/service/itsmagent/extractor.go`
-
-这一层只负责“从用户自然语言里抽字段”，主要负责：
-- 组织 prompt
-- 调用 chat model
-- 解析模型返回 JSON
-- 把抽取结果合并回 `TicketDraft`
-
-如果你想改“AI 怎么理解用户输入、怎么追问更像人工客服”，主要看这里。
-
-## 状态流转
-
-当前状态机只有两个业务阶段：
-
-1. `collect`
-作用：补充缺失信息  
-中断类型：`need_info`
-
-2. `confirm`
-作用：让用户确认草稿，必要时允许微调  
-中断类型：`need_confirm`
-
-当 `confirm` 阶段用户确认后，流程进入提交，不再产生新的人工确认中断，最终返回 `done`。
-
-`TicketAgentState` 会被 ADK checkpoint 持久化，其中包含：
-- 当前阶段 `Stage`
-- 当前语言 `Language`
-- 当前草稿 `Draft`
-- 当前待恢复的中断信息 `Pending`
-
-这也是为什么 `resume` 只需要 `checkpoint_id + interrupt_id + targets` 就能继续。
-
-## 信息完整性判断位置
-
-完整性判断在：
-- `internal/service/itsmagent/agent.go`
-- 函数：`needInfoInterrupt`
-
-当前规则包括：
-- `subject` 不能为空
-- `othersDesc` 不能为空
-- `serviceLevel` 必须是合法枚举 `1~4`
-- `priority` 必须是合法枚举 `1~4`
-- 即使枚举值合法，如果模型返回的置信度低于阈值，也仍然视为不完整
-
-相关调用链：
-- 首次提问：`Run -> extractor.FillDraft -> needInfoInterrupt`
-- 补充信息：`Resume(stageCollect) -> extractor.FillDraft -> needInfoInterrupt`
-
-如果需要修改“什么样的工单才算完整”，优先改这里。
-
-## 模型抽取与追问提示词位置
-
-模型抽取提示词在：
-- `internal/service/itsmagent/extractor.go`
-- 函数：`buildExtractPrompt`
-
-这里定义了模型需要做的事情：
-- 从用户输入中提取工单字段
-- 不确定时保留空值
-- 通过 `clarify_question` 给出下一轮应追问用户的内容
-
-当前关键规则包括：
-- `subject/othersDesc` 应简洁可用
-- `serviceLevel`、`priority` 都要映射为固定枚举值
-- 如果不确定，就留空并返回 `clarify_question`
-- `clarify_question`、`subject`、`othersDesc` 尽量跟随用户输入语言
-
-如果需要告诉 AI “什么才算完整工单”“缺字段时该如何引导用户”，优先改这里。
-
-## 追问文案生成位置
-
-用户实际看到的补充提示文案在：
-- `internal/service/itsmagent/agent.go`
-- 函数：`needInfoInterrupt`
-- 辅助函数：`missingFieldLabels`
-
-当前逻辑：
-- 先根据缺失字段生成主提示，例如“请补充：服务级别、工单类型”
-- 如果模型返回了 `clarify_question`，则拼接为“补充说明”
-- 固定提示文案会根据用户语言在中文和英文之间切换
-
-如果需要修改字段中文名称或主提示文案，可改这两处。
-
-## 语言策略
-
-当前实现中，语言策略分两部分：
-
-1. 固定提示文案  
-在 `agent.go` 中根据用户输入做简单语言判断：
-- 中文输入 -> 中文固定提示
-- 非中文输入 -> 英文固定提示
-
-2. 模型生成内容  
-在 `extractor.go` 的 prompt 里要求：
-- `clarify_question`
-- `subject`
-- `othersDesc`
-
-尽量使用与用户输入相同的语言。
-
-当前固定文案层面只区分“中文 / 非中文”。如果后续需要更细的多语言支持，可以继续扩展语言识别和文案模板。
-
-## 常见排查入口
-
-### `query` 很慢
-
-优先看：
-- `internal/controller/itsm/itsm_v1_agent_query.go`
-- `internal/service/itsmagent/service.go`
-- `internal/service/itsmagent/extractor.go`
-
-通常慢点在模型抽取，不在 ADK interrupt 本身。
-
-### `missing_fields` 和 prompt 不一致
-
-优先看：
-- `internal/service/itsmagent/agent.go`
-- 函数：`needInfoInterrupt`
-
-主提示来自缺失字段；`clarify_question` 只是补充说明。
-
-### `resume` 后没有继续
-
-优先看：
-- `Service.Resume` 是否把 `targets` 正确映射到 `ResumeCollectData / ResumeConfirmData`
-- `interrupt_id` 是否与上一次返回的一致
-- `checkpoint_id` 是否仍然有效
-
-### 工单重复创建
-
-优先看：
-- `agent.go`
-- 函数：`submitTicket`
-- 函数：`idempotencyKey`
-
-当前逻辑使用 `checkpoint_id + 草稿摘要` 做幂等键。
-
-## 如何新增一个必填槽位
-
-如果后续要把某个信息升级为真正的必填槽位，例如“联系方式”“设备编号”“宿舍位置”，建议按下面顺序改，避免只改一半导致流程不一致。
-
-### 第一步：定义草稿字段
-
-先在 `internal/service/itsmagent/types.go` 的 `TicketDraft` 中新增字段。
-
-例如：
-- `ContactPhone string`
-- `DeviceID string`
-
-这一步的意义是：让该信息成为 agent 内部的正式槽位，而不是继续混在 `subject` 或 `othersDesc` 的自由文本里。
-
-### 第二步：扩展模型输出结构
-
-在 `internal/service/itsmagent/types.go` 的 `ExtractResult` 中新增同名字段。
-
-例如：
-- `ContactPhone string`
-- `DeviceID string`
-
-否则即使 prompt 要求模型抽取，服务端也接不到这个字段。
-
-### 第三步：修改抽取提示词
-
-在 `internal/service/itsmagent/extractor.go` 中修改：
-- `buildExtractPrompt`
-
-需要同时改三处：
-1. JSON schema 中加入新字段
-2. 规则中写明什么情况下必须抽取该字段
-3. 缺失时应该如何追问用户
-
-例如可以写：
-- 如果缺少联系方式，优先追问可回拨手机号
-- 如果缺少设备编号，优先追问设备标签或序列号
-
-### 第四步：把模型结果合并回草稿
-
-在 `internal/service/itsmagent/extractor.go` 的 `FillDraft` 中，把 `ExtractResult` 的新字段回填到 `TicketDraft`。
-
-如果这一步漏掉，模型虽然可能返回了字段，后续完整性判断仍然会认为它缺失。
-
-### 第五步：加入完整性判断
-
-在 `internal/service/itsmagent/agent.go` 的 `needInfoInterrupt` 中，把新字段纳入缺失判断。
-
-例如：
-- 为空则加入 `missing`
-- 如果存在格式校验，也在这里做最终裁决
-
-这一步决定了系统是否继续返回 `need_info`。
-
-### 第六步：补充字段中文标签
-
-在 `internal/service/itsmagent/agent.go` 的 `missingFieldLabels` 中新增这个字段的展示名称。
-
-例如：
-- `contactPhone -> 联系电话`
-- `deviceID -> 设备编号`
-
-否则前端看到的提示会直接暴露内部字段名。
-
-### 第七步：确认是否允许在确认阶段编辑
-
-如果新字段需要在 `need_confirm` 阶段允许前端修改，则要同步修改：
-- `buildConfirmInterrupt`
-- API 层的确认输入结构
-- OpenAPI 示例和字段说明
-
-如果不允许前端修改，则只需要加入只读展示。
-
-### 第八步：同步 API 展示结构
-
-如果这个字段要返回给前端展示或编辑，还需要同步：
-- `api/itsm/v1/agent.go` 中的 `TicketDraft`
-- 相关 `dc` 说明
-- examples
-- OpenAPI patch 示例
-
-否则后端内部虽然有这个字段，前端文档里看不到。
-
-### 第九步：补测试
-
-至少补两类测试：
-
-1. 抽取/提示测试
-- 新字段缺失时，提示里能体现该字段
-- 新字段存在时，不再重复追问
-
-2. 完整性测试
-- 新字段为空 -> 返回 `need_info`
-- 新字段齐全 -> 可以进入 `need_confirm`
-
-## 新增槽位的最小检查清单
-
-新增一个必填字段时，至少检查下面这些位置是否都改到了：
-
-- `types.go` 的 `TicketDraft`
-- `types.go` 的 `ExtractResult`
-- `extractor.go` 的 `buildExtractPrompt`
-- `extractor.go` 的 `FillDraft`
-- `agent.go` 的 `needInfoInterrupt`
-- `agent.go` 的 `missingFieldLabels`
-- `api/itsm/v1/agent.go` 的返回结构和 examples
-- 对应测试
-
-只改 prompt、不改完整性判断，字段不会真正变成必填。  
-只改完整性判断、不改抽取与 API，用户体验会很差。
+- [SSE_AGENT_RUNTIME_PLAN.md](/home/nickw/lakeside/docs/SSE_AGENT_RUNTIME_PLAN.md)
+- [KNOWLEDGE_AGENT_DESIGN_GUIDELINES.md](/home/nickw/lakeside/docs/KNOWLEDGE_AGENT_DESIGN_GUIDELINES.md)

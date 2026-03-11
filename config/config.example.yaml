@@ -4,6 +4,8 @@
 server:
   # HTTP 监听地址。开发环境可直接写 :8000 或 :8011。
   address: ":8000"
+  # 启动模式：api / worker / all。默认建议 all，便于本地联调。
+  mode: "all"
   # OpenAPI JSON 暴露路径。
   openapiPath: "/api.json"
   # Swagger UI 暴露路径。
@@ -61,39 +63,157 @@ agent:
     db: 0
 
   checkpoint:
-    # ITSM subagent checkpoint TTL，单位小时。
+    # ITSM leaf agent checkpoint TTL，单位小时。
     ttlHours: 24
 
   idempotency:
     # ITSM 建单成功结果的幂等缓存 TTL，单位小时。
     ttlHours: 24
 
-assistant:
+agents:
   storage:
-    # 顶层 assistant 的 SQLite 路径。
-    sqlitePath: "./runtime/assistant.db"
+    # 多层 agent 平台运行时存储类型：sqlite / mssql。
+    provider: "sqlite"
+    # provider=sqlite 时使用的本地文件路径。
+    sqlitePath: "./runtime/agent.db"
+    # provider=mssql 时使用的数据库连接参数。
+    mssql:
+      host: "sqlserver001.cuhk.edu.cn"
+      port: 1433
+      user: "yycagentsqluser"
+      password: "YOUR_MSSQL_PASSWORD"
+      database: "yycagentmssql"
+
+  runtime:
+    # 并发 worker 数。MODE=worker/all 时生效。
+    workerCount: 4
+    # Redis Streams key：run 队列。
+    streamKey: "lakeside:interactive:runtime:agent:runs:v1"
+    # Redis Streams 消费组名称。
+    streamGroup: "lakeside-agent-workers"
+    # Redis Streams consumer 名称前缀。
+    consumerPrefix: "agent-worker"
+    # XREADGROUP 阻塞等待毫秒数。
+    readBlockMs: 5000
+    # Redis Pub/Sub 频道：用于唤醒 SSE 拉取最新事件。
+    pubsubChannel: "lakeside:interactive:runtime:agent:events:v1"
 
   checkpoint:
-    # 顶层 assistant checkpoint TTL，单位小时。
+    # 顶层 root assistant checkpoint TTL，单位小时。
     ttlHours: 24
 
   summarization:
-    # 触发 ADK Summarization Middleware 的上下文 token 上限。
+    # Supervisor 层 ADK Summarization Middleware 的上下文 token 上限。
     contextTokens: 12000
     # 压缩时尽量保留的用户消息 token 预算。
     preserveUserMessageTokens: 2000
 
-  agent:
-    # 顶层 assistant 最大推理轮数。
-    maxIterations: 6
-
   memory:
-    # 每个用户最多注入多少条长期记忆。
+    # 每个 assistant_key + user_upn 组合最多注入多少条长期记忆。
     maxItems: 8
     # 长期记忆异步 worker 数。
     workers: 1
     # 长期记忆任务队列长度。
     queueSize: 32
+
+  rag:
+    # 独立 RAG 服务 HTTP 地址。Lakeside 只接入 retrieve / batch_get，不负责知识库管理。
+    baseURL: "http://127.0.0.1:8080"
+    # 调用 RAG 服务的超时，单位毫秒。
+    timeoutMs: 20000
+    # knowledge leaf 默认检索条数。
+    defaultTopK: 5
+
+  roots:
+    # 顶层助手。一个 Lakeside 实例未来可以挂多个 root assistant，例如 campus、coding。
+    - key: "campus"
+      description: "大学 AI 助手顶层入口，负责在不同领域助手之间做编排。"
+      maxIterations: 6
+      children:
+        - "it"
+      # 可用占位符：
+      # - {user_upn}
+      # - {assistant_context}
+      # - {child_catalog}
+      # - {agent_key}
+      instructionTemplate: |
+        你是大学 AI 助手的顶层总控。
+        当前登录用户 UPN：{user_upn}
+        系统已知背景与长期记忆如下：
+        {assistant_context}
+
+        你当前可调用的下级助手如下：
+        {child_catalog}
+
+        工作规则：
+        - 你负责决定应该调用哪个领域助手；必要时可以连续调用多个下级助手。
+        - 与校园信息化、账号、网络、邮箱、VPN、工单、知识库、信息系统使用说明相关的问题，应交给 it 领域助手处理。
+        - 对于当前未接入的领域，直接明确说明当前版本暂未接入对应小助手，不要编造处理结果。
+        - 始终使用用户当前的语言回答。
+        - 不要伪造学校政策、系统状态、工单结果或知识来源。
+
+  domains:
+    # 领域助手。当前先实现 it；hr、osa 等后续按同样结构接入。
+    - key: "it"
+      description: "校园 IT 小助手，负责 IT 知识检索、故障报修与正式 IT 支持请求。"
+      maxIterations: 8
+      children:
+        - "itsm"
+        - "campus_it_kb"
+        - "campus_it_kb_for_itso_student_assistant"
+      instructionTemplate: |
+        你是校园 IT 小助手总控。
+        当前登录用户 UPN：{user_upn}
+        系统已知背景与长期记忆如下：
+        {assistant_context}
+
+        你当前可调用的叶子 agent 如下：
+        {child_catalog}
+
+        工作规则：
+        - 对于 FAQ、操作步骤、系统说明、已知流程、文档内容查询，调用最匹配的 knowledge 叶子 agent。
+        - `campus_it_kb` 用于面向普通师生的公开 IT 知识，如 VPN、邮箱、账号、校园网、系统使用说明、常见故障排查。
+        - `campus_it_kb_for_itso_student_assistant` 只在以下场景使用：用户明确说自己是 ITSO 学生助理；或问题本身明显属于学生助理内部知识，如学生助理手册、内部规范、引导话术、学生群组邮箱地址、语料库收集标准。
+        - 对于普通 WiFi/VPN/邮箱/账号故障，不要优先调用 `campus_it_kb_for_itso_student_assistant`。
+        - 对于报障、维修、需要人工 IT 支持、需要提交正式工单的请求，调用 itsm。
+        - 如果同一轮既需要知识回答又需要发起工单，你必须先调用一个或多个 knowledge 叶子 agent 给出可执行建议，再继续调用 itsm。
+        - 当用户出现“先告诉我怎么排查 / 顺便说明原因 / 同时再帮我报修 / 再帮我提工单”这类组合诉求时，不要直接只调用 itsm。
+        - 如有必要，你可以再次调用同一个 knowledge 叶子 agent，用改写后的更具体问题继续检索；不要被“已经调过一次”束缚。
+        - 只有在已经拿到足够证据时，才停止继续调用 knowledge 叶子 agent。
+        - 对于纯知识问答，一旦某个 knowledge 叶子 agent 已经给出足够答案，就停止继续调用，直接整理后返回。
+        - 对于“知识回答 + 工单”组合诉求，先完成必要的 knowledge 检索，再调用 itsm；如果用户已经明确要求报修/提工单，不要在多个 knowledge 叶子 agent 之间来回扩散。
+        - 如果 knowledge 已经给出了有用信息，而 itsm 后续又产生 interrupt，仍然保留前面的知识回答，不要丢弃。
+        - 你可以在一个回合里连续调用多个叶子 agent，不要机械地只调用一个就停止。
+        - 如果证据不足，不要编造；直接说明当前没有足够依据。
+        - 始终使用用户当前的语言回答。
+
+  leaves:
+    # 叶子 agent 只做一件明确的事。当前支持 itsm / knowledge 两种类型。
+    - key: "itsm"
+      type: "itsm"
+      description: "处理 IT 报障、账号权限异常、网络/邮箱/系统故障、正式工单提交与中断恢复。"
+
+    - key: "campus_it_kb"
+      type: "knowledge"
+      description: "回答校园 IT FAQ、操作步骤、VPN、邮箱、账号和常见系统使用问题。"
+      kbIDs:
+        - "campus-it-faq"
+      topK: 5
+      # 单次知识问答内部最多生成多少个改写检索查询；0 表示走默认值，当前默认 3。
+      rewriteQueries: 3
+      maxContextDocs: 4
+      sourceLimit: 4
+
+    - key: "campus_it_kb_for_itso_student_assistant"
+      type: "knowledge"
+      description: "仅面向 ITSO 学生助理，回答学生助理手册、内部操作规范、群组邮箱地址等问题。"
+      kbIDs:
+        - "itso-student-assistant-kb"
+      topK: 5
+      # 与上面相同，允许在同一轮知识问答里做多次改写检索。
+      rewriteQueries: 3
+      maxContextDocs: 4
+      sourceLimit: 4
 
 itsm:
   # 下游 ITSM 接口地址。
@@ -122,3 +242,9 @@ itsm:
     maxCandidates: 200
     # 归为同类问题的相似度阈值，范围 0~1。
     similarityThreshold: 0.90
+
+uniauth:
+  # UniAuth 用户查询服务地址，用于把请求头里的 UPN 换成下游 ITSM 所需的员工编号。
+  baseURL: "http://127.0.0.1:9000"
+  # 查询 UniAuth 的超时，单位毫秒。
+  timeoutMs: 5000

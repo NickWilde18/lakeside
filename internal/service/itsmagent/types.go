@@ -1,6 +1,7 @@
 package itsmagent
 
 import (
+	"context"
 	"time"
 
 	"lakeside/api/itsm/v1"
@@ -67,6 +68,10 @@ type ResumeConfirmData struct {
 	Confirmed  bool   `json:"confirmed"`
 	Subject    string `json:"subject,omitempty"`
 	OthersDesc string `json:"othersDesc,omitempty"`
+}
+
+type employeeIDResolver interface {
+	ResolveEmployeeID(ctx context.Context, upn string) (string, error)
 }
 
 type TicketExecutionResult struct {

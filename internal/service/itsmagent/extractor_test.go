@@ -48,7 +48,7 @@ func TestNormalizePriority(t *testing.T) {
 }
 
 func TestNeedInfoInterruptDoesNotAskUserForServiceLevelDirectly(t *testing.T) {
-	agent := NewTicketCreateAgent(nil, nil, nil, nil, serviceConfig{EnumConfidenceThreshold: 0.75})
+	agent := NewTicketCreateAgent(nil, nil, nil, nil, nil, serviceConfig{EnumConfidenceThreshold: 0.75})
 	info, incomplete := agent.needInfoInterrupt("zh", TicketDraft{
 		UserCode:               "122020255",
 		Subject:                "寝室WiFi故障",
@@ -73,7 +73,7 @@ func TestNeedInfoInterruptDoesNotAskUserForServiceLevelDirectly(t *testing.T) {
 }
 
 func TestNeedInfoInterruptUsesEnglishPromptForEnglishUsers(t *testing.T) {
-	agent := NewTicketCreateAgent(nil, nil, nil, nil, serviceConfig{EnumConfidenceThreshold: 0.75})
+	agent := NewTicketCreateAgent(nil, nil, nil, nil, nil, serviceConfig{EnumConfidenceThreshold: 0.75})
 	info, incomplete := agent.needInfoInterrupt("en", TicketDraft{
 		UserCode:               "122020255",
 		Subject:                "Dorm WiFi issue",
