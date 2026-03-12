@@ -336,6 +336,34 @@ func (r *sqliteRepository) GetSession(ctx context.Context, sessionID string) (*S
 	return &record, nil
 }
 
+func (r *sqliteRepository) ListSessions(ctx context.Context, assistantKey, userUPN string, limit int) ([]SessionRecord, error) {
+	model := r.db.Model(tableAgentSessions).Ctx(ctx).
+		Where("assistant_key", assistantKey).
+		Where("user_upn", userUPN).
+		WhereNot("status", statusDeleted).
+		OrderDesc("updated_at")
+	if limit > 0 {
+		model = model.Limit(limit)
+	}
+	var result []SessionRecord
+	if err := model.Scan(&result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (r *sqliteRepository) DeleteSession(ctx context.Context, assistantKey, sessionID, userUPN string, deletedAt time.Time) error {
+	_, err := r.db.Model(tableAgentSessions).Ctx(ctx).
+		Where("assistant_key", assistantKey).
+		Where("session_id", sessionID).
+		Where("user_upn", userUPN).
+		Data(g.Map{
+			"status":     statusDeleted,
+			"updated_at": deletedAt,
+		}).Update()
+	return err
+}
+
 func (r *sqliteRepository) AppendMessage(ctx context.Context, message MessageRecord) (int64, error) {
 	result, err := r.db.Model(tableAgentMessages).Ctx(ctx).Data(g.Map{
 		"assistant_key":    message.AssistantKey,
@@ -375,6 +403,18 @@ func (r *sqliteRepository) ListRecentMessages(ctx context.Context, sessionID str
 	}
 	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
 		result[i], result[j] = result[j], result[i]
+	}
+	return result, nil
+}
+
+func (r *sqliteRepository) ListMessages(ctx context.Context, sessionID string) ([]MessageRecord, error) {
+	var result []MessageRecord
+	err := r.db.Model(tableAgentMessages).Ctx(ctx).
+		Where("session_id", sessionID).
+		OrderAsc("id").
+		Scan(&result)
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -465,6 +505,18 @@ func (r *sqliteRepository) GetRun(ctx context.Context, runID string) (*RunRecord
 		return nil, err
 	}
 	return &record, nil
+}
+
+func (r *sqliteRepository) ListRunsBySession(ctx context.Context, sessionID string) ([]RunRecord, error) {
+	var result []RunRecord
+	err := r.db.Model(tableAgentRuns).Ctx(ctx).
+		Where("session_id", sessionID).
+		OrderAsc("started_at").
+		Scan(&result)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (r *sqliteRepository) AppendRunEvent(ctx context.Context, event RunEventRecord) (int64, error) {

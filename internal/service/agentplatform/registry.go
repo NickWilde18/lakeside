@@ -30,6 +30,7 @@ func newRuntimeRegistry(ctx context.Context, cfg *config) (*runtimeRegistry, err
 	}
 	infos := make(map[string]nodeInfo)
 	leafAgents := make(map[string]adk.Agent)
+	leafBindings := make(map[string]domainassistant.LeafBinding)
 
 	rag := ragclient.NewClient(ragclient.Config{
 		BaseURL: cfg.RAG.BaseURL,
@@ -42,6 +43,13 @@ func newRuntimeRegistry(ctx context.Context, cfg *config) (*runtimeRegistry, err
 		case "itsm":
 			agent := leafitsm.New(ctx, leaf.Key, leaf.Description)
 			leafAgents[leaf.Key] = agent
+			leafBindings[leaf.Key] = domainassistant.LeafBinding{
+				Key:           leaf.Key,
+				Description:   agent.Description(ctx),
+				Kind:          leaf.Type,
+				Interruptible: true,
+				Agent:         agent,
+			}
 			infos[leaf.Key] = nodeInfo{Key: leaf.Key, Description: agent.Description(ctx), Kind: leaf.Type}
 		case "knowledge":
 			agent := leafknowledge.New(ctx, leafknowledge.Config{
@@ -54,6 +62,13 @@ func newRuntimeRegistry(ctx context.Context, cfg *config) (*runtimeRegistry, err
 				SourceLimit:    leaf.SourceLimit,
 			}, rag, chatModel)
 			leafAgents[leaf.Key] = agent
+			leafBindings[leaf.Key] = domainassistant.LeafBinding{
+				Key:           leaf.Key,
+				Description:   leaf.Description,
+				Kind:          leaf.Type,
+				Interruptible: false,
+				Agent:         agent,
+			}
 			infos[leaf.Key] = nodeInfo{Key: leaf.Key, Description: leaf.Description, Kind: leaf.Type}
 		default:
 			return nil, fmt.Errorf("unsupported leaf type: %s", leaf.Type)
@@ -62,12 +77,22 @@ func newRuntimeRegistry(ctx context.Context, cfg *config) (*runtimeRegistry, err
 
 	domainAgents := make(map[string]adk.Agent)
 	for _, domain := range cfg.Domains {
-		children, err := collectChildren(domain.Children, leafAgents, nil)
-		if err != nil {
-			return nil, fmt.Errorf("build domain %s failed: %w", domain.Key, err)
+		children := make([]adk.Agent, 0, len(domain.Children))
+		orderedLeaves := make([]domainassistant.LeafBinding, 0, len(domain.Children))
+		for _, childKey := range domain.Children {
+			agent, ok := leafAgents[childKey]
+			if !ok {
+				return nil, fmt.Errorf("build domain %s failed: unknown child key %s", domain.Key, childKey)
+			}
+			binding, ok := leafBindings[childKey]
+			if !ok {
+				return nil, fmt.Errorf("build domain %s failed: missing leaf binding %s", domain.Key, childKey)
+			}
+			children = append(children, agent)
+			orderedLeaves = append(orderedLeaves, binding)
 		}
 		instruction := renderInstruction(domain.InstructionTemplate, domain.Key, childCatalog(domain.Children, infos))
-		agent, err := domainassistant.New(ctx, domain.Key, domain.Description, instruction, domain.MaxIterations, children)
+		agent, err := domainassistant.New(ctx, domain.Key, domain.Description, instruction, domain.MaxIterations, children, orderedLeaves)
 		if err != nil {
 			return nil, err
 		}

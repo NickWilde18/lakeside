@@ -75,6 +75,53 @@ func buildAgentSources(sources []agentplatform.Source) []v1.AgentSource {
 	})
 }
 
+func buildAgentSessionSummary(summary agentplatform.SessionSummary) v1.AgentSessionSummary {
+	return v1.AgentSessionSummary{
+		AssistantKey:  summary.AssistantKey,
+		SessionID:     summary.SessionID,
+		Title:         summary.Title,
+		Status:        summary.Status,
+		ActivePath:    append([]string(nil), summary.ActivePath...),
+		LastRunID:     summary.LastRunID,
+		LastRunStatus: summary.LastRunStatus,
+		CreatedAt:     formatTime(summary.CreatedAt),
+		UpdatedAt:     formatTime(summary.UpdatedAt),
+	}
+}
+
+func buildAgentSessionDetail(detail *agentplatform.SessionDetail) v1.AgentSessionDetail {
+	if detail == nil {
+		return v1.AgentSessionDetail{}
+	}
+	out := v1.AgentSessionDetail{
+		Session:  buildAgentSessionSummary(detail.Session),
+		Messages: make([]v1.AgentSessionMessage, 0, len(detail.Messages)),
+		Runs:     make([]v1.AgentSessionRunTrace, 0, len(detail.Runs)),
+	}
+	for _, message := range detail.Messages {
+		out.Messages = append(out.Messages, v1.AgentSessionMessage{
+			ID:           message.ID,
+			Role:         message.Role,
+			Content:      message.Content,
+			ActivePath:   append([]string(nil), message.ActivePath...),
+			CheckpointID: message.CheckpointID,
+			CreatedAt:    formatTime(message.CreatedAt),
+		})
+	}
+	for _, trace := range detail.Runs {
+		snapshot := buildAgentRunSnapshot(trace.Snapshot)
+		runTrace := v1.AgentSessionRunTrace{
+			Snapshot: &snapshot,
+			Events:   make([]v1.AgentRunEvent, 0, len(trace.Events)),
+		}
+		for _, event := range trace.Events {
+			runTrace.Events = append(runTrace.Events, buildAgentRunEvent(event))
+		}
+		out.Runs = append(out.Runs, runTrace)
+	}
+	return out
+}
+
 type runEventPayload struct {
 	EventID      int64    `json:"event_id"`
 	RunID        string   `json:"run_id"`
@@ -89,6 +136,20 @@ type runEventPayload struct {
 
 func buildRunEventPayload(event agentplatform.RunEventRecord) runEventPayload {
 	return runEventPayload{
+		EventID:      event.ID,
+		RunID:        event.RunID,
+		AssistantKey: event.AssistantKey,
+		SessionID:    event.SessionID,
+		Path:         parsePath(event.PathJSON),
+		EventType:    event.EventType,
+		Message:      event.Message,
+		Payload:      parsePayload(event.PayloadJSON),
+		CreatedAt:    formatTime(event.CreatedAt),
+	}
+}
+
+func buildAgentRunEvent(event agentplatform.RunEventRecord) v1.AgentRunEvent {
+	return v1.AgentRunEvent{
 		EventID:      event.ID,
 		RunID:        event.RunID,
 		AssistantKey: event.AssistantKey,

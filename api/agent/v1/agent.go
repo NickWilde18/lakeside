@@ -120,7 +120,7 @@ type AgentRunCancelRes struct {
 
 // AgentRunEventsReq 订阅一次 run 的 SSE 事件流。
 type AgentRunEventsReq struct {
-	g.Meta       `path:"/v1/agent/{assistant_key}/runs/{run_id}/events" tags:"Agent" method:"get" summary:"订阅 run 的 SSE 事件流" dc:"返回 text/event-stream。支持浏览器 Last-Event-ID 断线重连；事件流会先回放数据库中已有事件，再实时推送后续事件。"`
+	g.Meta       `path:"/v1/agent/{assistant_key}/runs/{run_id}/events" tags:"Agent" method:"get" summary:"订阅 run 的 SSE 事件流" dc:"返回 text/event-stream。支持浏览器 Last-Event-ID 断线重连；事件流会先回放数据库中已有事件，再实时推送后续事件。事件覆盖 run 生命周期、domain 规划阶段、knowledge 检索/生成阶段和 ITSM 中断阶段。"`
 	AssistantKey string `json:"-" in:"path" param:"assistant_key" v:"required" dc:"顶层助手 key" example:"campus"`
 	RunID        string `json:"-" in:"path" param:"run_id" v:"required" dc:"run ID" example:"run-8f4b6d3b"`
 	UserID       string `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID" example:"122020255@link.cuhk.edu.cn"`
@@ -131,6 +131,102 @@ type AgentRunEventsReq struct {
 // AgentRunEventsRes 是 SSE 事件流接口的占位响应结构。
 type AgentRunEventsRes struct {
 	Placeholder string `json:"placeholder,omitempty" dc:"SSE 接口返回 text/event-stream，本结构仅用于满足 GoFrame XxxRes 命名要求"`
+}
+
+// AgentRunEvent 表示 run 事件流中的一条结构化事件。
+type AgentRunEvent struct {
+	EventID      int64    `json:"event_id" dc:"事件 ID，可用于 SSE 断线重连" example:"568"`
+	RunID        string   `json:"run_id" dc:"所属 run ID" example:"run-659d3bc2-3db5-4dbe-9d8d-125b85a398e8"`
+	AssistantKey string   `json:"assistant_key" dc:"顶层助手 key" example:"campus"`
+	SessionID    string   `json:"session_id" dc:"所属会话 ID" example:"sess-5e7ae0ce-46ee-4344-8b99-c2da4c83df32"`
+	Path         []string `json:"path,omitempty" dc:"当前事件对应的 agent 路径" example:"campus,it,itsm"`
+	EventType    string   `json:"event_type" dc:"事件类型。常见值：run_started、run_waiting_input、run_completed、run_failed、run_cancelled、agent_entered、agent_completed、domain_plan_started、domain_plan_ready、domain_execute_started、domain_supervisor_fallback、knowledge_run_started、knowledge_retrieve_started、knowledge_retrieve_finished、knowledge_answer_chunk、knowledge_answer_generation_started、knowledge_answer_generation_finished、knowledge_answer_ready、knowledge_run_completed、itsm_interrupt_emitted、itsm_done" example:"knowledge_answer_chunk"`
+	Message      string   `json:"message,omitempty" dc:"事件说明文案" example:"开始检索知识库"`
+	Payload      any      `json:"payload,omitempty" dc:"事件附带的结构化载荷"`
+	CreatedAt    string   `json:"created_at,omitempty" dc:"事件创建时间" example:"2026-03-12T01:14:49+08:00"`
+}
+
+// AgentSessionSummary 表示一个顶层助手会话摘要。
+type AgentSessionSummary struct {
+	AssistantKey  string   `json:"assistant_key" dc:"当前顶层助手 key" example:"campus"`
+	SessionID     string   `json:"session_id" dc:"当前会话 ID" example:"sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5"`
+	Title         string   `json:"title" dc:"会话标题，通常由首条用户消息裁剪得到" example:"VPN 连不上，顺便告诉我学生群组邮箱地址"`
+	Status        string   `json:"status" dc:"当前会话状态，如 active、done" example:"active"`
+	ActivePath    []string `json:"active_path,omitempty" dc:"当前会话最后一次活跃的 agent 路径" example:"campus,it,itsm"`
+	LastRunID     string   `json:"last_run_id,omitempty" dc:"当前会话最近一次 run ID" example:"run-8f4b6d3b"`
+	LastRunStatus string   `json:"last_run_status,omitempty" dc:"当前会话最近一次 run 状态" example:"waiting_input"`
+	CreatedAt     string   `json:"created_at,omitempty" dc:"会话创建时间" example:"2026-03-12T00:15:00+08:00"`
+	UpdatedAt     string   `json:"updated_at,omitempty" dc:"会话更新时间" example:"2026-03-12T00:18:00+08:00"`
+}
+
+// AgentSessionsReq 查看某个顶层助手的历史会话列表。
+type AgentSessionsReq struct {
+	g.Meta       `path:"/v1/agent/{assistant_key}/sessions" tags:"Agent" method:"get" summary:"查看当前用户的 agent 历史会话列表" dc:"返回当前 assistant_key 下、当前 X-User-ID 对应的历史会话摘要列表，供前端展示历史记录。"`
+	AssistantKey string `json:"-" in:"path" param:"assistant_key" v:"required" dc:"顶层助手 key" example:"campus"`
+	UserID       string `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID" example:"122020255@link.cuhk.edu.cn"`
+	Limit        int    `json:"limit" in:"query" dc:"返回条数上限，默认 20" example:"20"`
+}
+
+// AgentSessionsRes 返回当前用户在某个顶层助手下的历史会话摘要列表。
+type AgentSessionsRes struct {
+	AssistantKey string                `json:"assistant_key" dc:"当前顶层助手 key" example:"campus"`
+	Items        []AgentSessionSummary `json:"items" dc:"历史会话摘要列表"`
+}
+
+// AgentSessionMessage 表示历史会话中的一条消息。
+type AgentSessionMessage struct {
+	ID           int64    `json:"id" dc:"消息记录 ID" example:"10"`
+	Role         string   `json:"role" dc:"消息角色，user 或 assistant" example:"assistant"`
+	Content      string   `json:"content" dc:"消息正文" example:"针对宿舍 WiFi 已连接但无法打开网页的情况，请按以下步骤排查。"`
+	ActivePath   []string `json:"active_path,omitempty" dc:"写入该消息时的 agent 路径" example:"campus,it,campus_it_kb_for_itso_student_assistant"`
+	CheckpointID string   `json:"checkpoint_id,omitempty" dc:"写入该消息时对应的 checkpoint_id；调试用" example:"ckpt-b64cb049-85a8-433a-a5b7-fb5ad6d2b0f0"`
+	CreatedAt    string   `json:"created_at,omitempty" dc:"消息创建时间" example:"2026-03-12T00:15:12+08:00"`
+}
+
+// AgentSessionRunTrace 表示某个历史 run 的快照与完整事件流。
+type AgentSessionRunTrace struct {
+	Snapshot *AgentRunSnapshot `json:"snapshot,omitempty" dc:"该 run 的最终快照"`
+	Events   []AgentRunEvent   `json:"events,omitempty" dc:"该 run 的完整事件列表，按时间顺序排列"`
+}
+
+// AgentSessionDetail 表示某个历史会话的完整详情。
+type AgentSessionDetail struct {
+	Session  AgentSessionSummary    `json:"session" dc:"会话摘要"`
+	Messages []AgentSessionMessage  `json:"messages,omitempty" dc:"该会话的消息列表，按时间顺序排列"`
+	Runs     []AgentSessionRunTrace `json:"runs,omitempty" dc:"该会话下的 run 列表及其事件轨迹"`
+}
+
+// AgentSessionDetailReq 查看一个历史会话的完整详情。
+type AgentSessionDetailReq struct {
+	g.Meta       `path:"/v1/agent/{assistant_key}/sessions/{session_id}" tags:"Agent" method:"get" summary:"查看一个 agent 历史会话详情" dc:"返回该会话的消息列表、run 快照和完整 run 事件，供前端恢复历史对话与执行轨迹。"`
+	AssistantKey string `json:"-" in:"path" param:"assistant_key" v:"required" dc:"顶层助手 key" example:"campus"`
+	SessionID    string `json:"-" in:"path" param:"session_id" v:"required" dc:"历史会话 ID" example:"sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5"`
+	UserID       string `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID" example:"122020255@link.cuhk.edu.cn"`
+}
+
+// AgentSessionDetailRes 返回一个历史会话的完整详情。
+type AgentSessionDetailRes struct {
+	Detail AgentSessionDetail `json:"detail" dc:"历史会话详情"`
+}
+
+// AgentSessionDeleteReq 删除一个历史会话。
+type AgentSessionDeleteReq struct {
+	g.Meta       `path:"/v1/agent/{assistant_key}/sessions/{session_id}" tags:"Agent" method:"delete" summary:"删除一个 agent 历史会话" dc:"默认做软删除，只从当前用户历史列表里移除该会话；为了避免破坏当前流程，不允许删除 queued、running 或 waiting_input 状态的会话。"`
+	AssistantKey string `json:"-" in:"path" param:"assistant_key" v:"required" dc:"顶层助手 key" example:"campus"`
+	SessionID    string `json:"-" in:"path" param:"session_id" v:"required" dc:"历史会话 ID" example:"sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5"`
+	UserID       string `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID" example:"122020255@link.cuhk.edu.cn"`
+}
+
+// AgentSessionDeleteResult 表示历史会话删除结果。
+type AgentSessionDeleteResult struct {
+	Deleted bool `json:"deleted" dc:"是否已成功删除当前历史会话" example:"true"`
+}
+
+// AgentSessionDeleteRes 返回历史会话删除结果。
+type AgentSessionDeleteRes struct {
+	AssistantKey string                   `json:"assistant_key" dc:"顶层助手 key" example:"campus"`
+	SessionID    string                   `json:"session_id" dc:"已删除的历史会话 ID" example:"sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5"`
+	Result       AgentSessionDeleteResult `json:"result" dc:"删除结果"`
 }
 
 // AgentMemory 表示一个长期记忆条目。
@@ -205,15 +301,15 @@ var (
 					"code":    0,
 					"message": "",
 					"data": g.Map{
-						"run_id":         "run-8f4b6d3b",
-						"assistant_key":  "campus",
-						"run_status":     "waiting_input",
-						"status":         "need_info",
-						"session_id":     "sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5",
-						"checkpoint_id":  "ckpt-b64cb049-85a8-433a-a5b7-fb5ad6d2b0f0",
-						"active_path":    []string{"campus", "it", "itsm"},
-						"started_at":     "2026-03-11T21:30:00+08:00",
-						"finished_at":    "2026-03-11T21:30:12+08:00",
+						"run_id":        "run-8f4b6d3b",
+						"assistant_key": "campus",
+						"run_status":    "waiting_input",
+						"status":        "need_info",
+						"session_id":    "sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5",
+						"checkpoint_id": "ckpt-b64cb049-85a8-433a-a5b7-fb5ad6d2b0f0",
+						"active_path":   []string{"campus", "it", "itsm"},
+						"started_at":    "2026-03-11T21:30:00+08:00",
+						"finished_at":   "2026-03-11T21:30:12+08:00",
 						"steps": []g.Map{{
 							"path":    []string{"campus", "it", "campus_it_kb"},
 							"kind":    "knowledge",
@@ -276,6 +372,95 @@ var (
 						"run_id":        "run-8f4b6d3b",
 						"result": g.Map{
 							"cancelled": true,
+						},
+					},
+				},
+			},
+		},
+	}
+	AgentSessionsResExamples = goai.Examples{
+		"list": {
+			Value: &goai.Example{
+				Summary: "查看顶层助手历史会话列表",
+				Value: g.Map{
+					"code":    0,
+					"message": "",
+					"data": g.Map{
+						"assistant_key": "campus",
+						"items": []g.Map{{
+							"assistant_key":   "campus",
+							"session_id":      "sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5",
+							"title":           "VPN 连不上，顺便告诉我学生群组邮箱地址",
+							"status":          "done",
+							"active_path":     []string{"campus", "it", "campus_it_kb"},
+							"last_run_id":     "run-8f4b6d3b",
+							"last_run_status": "done",
+							"created_at":      "2026-03-12T00:15:00+08:00",
+							"updated_at":      "2026-03-12T00:15:12+08:00",
+						}},
+					},
+				},
+			},
+		},
+	}
+	AgentSessionDetailResExamples = goai.Examples{
+		"detail": {
+			Value: &goai.Example{
+				Summary: "查看某个历史会话的完整详情",
+				Value: g.Map{
+					"code":    0,
+					"message": "",
+					"data": g.Map{
+						"detail": g.Map{
+							"session": g.Map{
+								"assistant_key":   "campus",
+								"session_id":      "sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5",
+								"title":           "VPN 连不上，顺便告诉我学生群组邮箱地址",
+								"status":          "done",
+								"last_run_id":     "run-8f4b6d3b",
+								"last_run_status": "done",
+							},
+							"messages": []g.Map{{
+								"id":         1,
+								"role":       "user",
+								"content":    "VPN 连不上，顺便告诉我学生群组邮箱地址。",
+								"created_at": "2026-03-12T00:15:00+08:00",
+							}, {
+								"id":         2,
+								"role":       "assistant",
+								"content":    "针对 VPN 连接问题，请先确认统一身份认证客户端和 VPN 软件配置。",
+								"created_at": "2026-03-12T00:15:12+08:00",
+							}},
+							"runs": []g.Map{{
+								"snapshot": g.Map{
+									"run_id":        "run-8f4b6d3b",
+									"assistant_key": "campus",
+									"run_status":    "done",
+								},
+								"events": []g.Map{{
+									"event_id":   10,
+									"event_type": "knowledge_retrieve_started",
+									"message":    "开始检索知识库",
+								}},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+	AgentSessionDeleteResExamples = goai.Examples{
+		"deleted": {
+			Value: &goai.Example{
+				Summary: "成功删除历史会话",
+				Value: g.Map{
+					"code":    0,
+					"message": "",
+					"data": g.Map{
+						"assistant_key": "campus",
+						"session_id":    "sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5",
+						"result": g.Map{
+							"deleted": true,
 						},
 					},
 				},

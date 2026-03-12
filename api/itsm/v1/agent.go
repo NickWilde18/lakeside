@@ -44,12 +44,13 @@ type AgentResponse struct {
 	Result       *AgentResult     `json:"result,omitempty" dc:"流程结束时的执行结果"`
 }
 
-// ResumeTarget 有两种用法：
-// 1. need_info：只传 answer。
-// 2. need_confirm：传 confirmed，可选覆盖 subject/othersDesc。
+// ResumeTarget 有三种常见用法：
+// 1. need_info：传 answer，继续补充缺失信息。
+// 2. need_info / need_confirm：传 confirmed=false，直接取消当前工单流程。
+// 3. need_confirm：传 confirmed=true，可选覆盖 subject/othersDesc。
 type ResumeTarget struct {
 	Answer     string `json:"answer" dc:"补信息阶段提交的用户回答" example:"道扬书院C1010，WiFi能搜到但连接后无法上网，宿舍里多台设备都受影响。"`
-	Confirmed  *bool  `json:"confirmed" dc:"确认阶段是否确认提交" example:"true"`
+	Confirmed  *bool  `json:"confirmed" dc:"是否继续当前工单流程。confirmed=false 表示直接取消当前工单流程；confirmed=true 表示确认继续提交" example:"true"`
 	Subject    string `json:"subject" dc:"确认阶段可回写的工单主题" example:"道扬书院C1010宿舍 WiFi故障"`
 	OthersDesc string `json:"othersDesc" dc:"确认阶段可回写的问题描述" example:"WiFi能搜到但连接后无法上网，从昨晚开始，多台设备均无法使用。"`
 }
@@ -65,10 +66,10 @@ type AgentQueryRes struct {
 }
 
 type AgentResumeReq struct {
-	g.Meta       `path:"/v1/itsm/agent/resume" tags:"ITSM" method:"post" summary:"继续 ITSM 工单对话" dc:"使用 query 返回的 checkpoint_id 和 interrupt_id 继续中断流程。补信息阶段传 answer；确认阶段传 confirmed，可选覆盖 subject/othersDesc。若 confirmed=true 且不传 subject、othersDesc，则表示直接确认当前草稿；若 confirmed=false，则表示取消提交。"`
+	g.Meta       `path:"/v1/itsm/agent/resume" tags:"ITSM" method:"post" summary:"继续 ITSM 工单对话" dc:"使用 query 返回的 checkpoint_id 和 interrupt_id 继续中断流程。补信息阶段通常传 answer；任一阶段传 confirmed=false 都表示取消当前工单流程；确认阶段传 confirmed=true，可选覆盖 subject、othersDesc。"`
 	UserID       string                   `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID；Lakeside 会在内部换取下游 ITSM 所需的员工编号" example:"122020255@link.cuhk.edu.cn"`
 	CheckpointID string                   `json:"checkpoint_id" v:"required" dc:"query 返回的流程快照 ID" example:"ckpt-b64cb049-85a8-433a-a5b7-fb5ad6d2b0f0"`
-	Targets      map[string]*ResumeTarget `json:"targets" v:"required" dc:"以 interrupt_id 为 key 的恢复输入集合，值为 ResumeTarget。补信息场景传 answer；确认场景传 confirmed，可选附带 subject、othersDesc。" example:"{\"6819cf6c-ea98-49d2-82b3-3e7cbcbc90b7\":{\"confirmed\":true,\"subject\":\"道扬书院C1010宿舍 WiFi故障\"}}"`
+	Targets      map[string]*ResumeTarget `json:"targets" v:"required" dc:"以 interrupt_id 为 key 的恢复输入集合，值为 ResumeTarget。补信息场景传 answer；任一阶段若 confirmed=false 则取消当前工单流程；确认场景 confirmed=true 时可附带 subject、othersDesc。" example:"{\"6819cf6c-ea98-49d2-82b3-3e7cbcbc90b7\":{\"confirmed\":true,\"subject\":\"道扬书院C1010宿舍 WiFi故障\"}}"`
 }
 
 type AgentResumeRes struct {

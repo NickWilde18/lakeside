@@ -27,7 +27,7 @@ func newAgentCallbackHandler(names ...string) callbacks.Handler {
 			if !shouldEmitCallback(info, allowedNames) {
 				return ctx
 			}
-			g.Log().Infof(ctx, "agentplatform callback start, name=%s type=%s", info.Name, info.Type)
+			g.Log().Infof(ctx, "agent node callback start, name=%s type=%s", info.Name, info.Type)
 			eventctx.EmitForNode(ctx, eventTypeAgentEntered, info.Name, info.Name, map[string]any{
 				"agent_name": info.Name,
 				"agent_type": info.Type,
@@ -43,7 +43,7 @@ func newAgentCallbackHandler(names ...string) callbacks.Handler {
 				// 过滤缺少起始时间的结束回调，避免重复的 0ms 事件污染前端时间线。
 				return ctx
 			}
-			g.Log().Infof(ctx, "agentplatform callback end, name=%s type=%s duration_ms=%d", info.Name, info.Type, time.Since(startedAt).Milliseconds())
+			g.Log().Infof(ctx, "agent node callback end, name=%s type=%s duration_ms=%d", info.Name, info.Type, time.Since(startedAt).Milliseconds())
 			eventctx.EmitForNode(ctx, eventTypeAgentCompleted, info.Name, info.Name, map[string]any{
 				"agent_name":  info.Name,
 				"agent_type":  info.Type,
@@ -58,17 +58,17 @@ func newAgentCallbackHandler(names ...string) callbacks.Handler {
 			startedAt, _ := ctx.Value(callbackStartedAtKey{}).(time.Time)
 			if err != nil && isExpectedCallbackSignal(err) {
 				if startedAt.IsZero() {
-					g.Log().Infof(ctx, "agentplatform callback expected stop, name=%s type=%s", info.Name, info.Type)
+					g.Log().Infof(ctx, "agent node callback expected stop, name=%s type=%s", info.Name, info.Type)
 					return ctx
 				}
-				g.Log().Infof(ctx, "agentplatform callback expected stop, name=%s type=%s duration_ms=%d", info.Name, info.Type, time.Since(startedAt).Milliseconds())
+				g.Log().Infof(ctx, "agent node callback expected stop, name=%s type=%s duration_ms=%d", info.Name, info.Type, time.Since(startedAt).Milliseconds())
 				return ctx
 			}
 			if startedAt.IsZero() {
-				g.Log().Errorf(ctx, "agentplatform callback error, name=%s type=%s err=%v", info.Name, info.Type, err)
+				g.Log().Errorf(ctx, "agent node callback error, name=%s type=%s err=%v", info.Name, info.Type, err)
 				return ctx
 			}
-			g.Log().Errorf(ctx, "agentplatform callback error, name=%s type=%s duration_ms=%d err=%v", info.Name, info.Type, time.Since(startedAt).Milliseconds(), err)
+			g.Log().Errorf(ctx, "agent node callback error, name=%s type=%s duration_ms=%d err=%v", info.Name, info.Type, time.Since(startedAt).Milliseconds(), err)
 			return ctx
 		}).
 		Build()

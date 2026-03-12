@@ -13,11 +13,33 @@ import (
 	"lakeside/internal/service/chatmodels"
 )
 
+// LeafBinding 描述一个可供领域助手调度的叶子 agent。
+type LeafBinding struct {
+	Key           string
+	Description   string
+	Kind          string
+	Interruptible bool
+	Agent         adk.Agent
+}
+
 // New 创建领域助手。
 //
-// 领域层也直接使用 Eino 官方 prebuilt/supervisor，
-// 让领域助手负责在多个叶子 agent 之间做协调，而不是手写 AgentTool 编排。
-func New(ctx context.Context, key, description, instruction string, maxIterations int, subAgents []adk.Agent) (adk.ResumableAgent, error) {
+// 领域层优先使用“计划器 + 官方 SequentialAgent”的执行方式：
+// 1. 先让模型产出结构化的叶子执行计划；
+// 2. 再由代码按计划顺序执行叶子 agent；
+// 3. 当计划器异常或无法判断时，回退到官方 supervisor 兜底。
+func New(ctx context.Context, key, description, instruction string, maxIterations int, subAgents []adk.Agent, leaves []LeafBinding) (adk.ResumableAgent, error) {
+	fallback, err := newSupervisor(ctx, key, description, instruction, maxIterations, subAgents)
+	if err != nil {
+		return nil, err
+	}
+	if len(leaves) == 0 {
+		return fallback, nil
+	}
+	return newPlannedAgent(ctx, key, description, instruction, leaves, fallback)
+}
+
+func newSupervisor(ctx context.Context, key, description, instruction string, maxIterations int, subAgents []adk.Agent) (adk.ResumableAgent, error) {
 	patchToolCalls, err := patchtoolcalls.New(ctx, &patchtoolcalls.Config{})
 	if err != nil {
 		return nil, err

@@ -88,7 +88,9 @@ func TestKnowledgeAgentRunReturnsSources(t *testing.T) {
 	require.Len(t, result.Sources, 1)
 	require.Equal(t, "kb-it", result.Sources[0].KBID)
 	require.Equal(t, "先连接学校 VPN。", result.Sources[0].Snippet)
-	require.Contains(t, result.Message, "参考来源")
+	require.Equal(t, "请先连接学校 VPN，再访问校内资源。", result.Message)
+	require.NotContains(t, result.Message, "参考来源")
+	require.NotContains(t, result.Message, "node-1")
 }
 
 func TestKnowledgeAgentRunReturnsFailureOnEmptyRetrieve(t *testing.T) {
@@ -108,4 +110,11 @@ func TestKnowledgeAgentRunReturnsFailureOnEmptyRetrieve(t *testing.T) {
 	require.NotNil(t, result)
 	require.False(t, result.Success)
 	require.Contains(t, result.Message, "knowledge base")
+}
+
+func TestNormalizeAssistantTextCollapsesPunctuationBurst(t *testing.T) {
+	t.Parallel()
+
+	got := normalizeAssistantText("您好!!!!!!!!!!!!!!!!??????????")
+	require.Equal(t, "您好!!!???", got)
 }

@@ -145,7 +145,19 @@ func (a *TicketCreateAgent) Resume(ctx context.Context, info *adk.ResumeInfo, _ 
 
 	switch state.Stage {
 	case stageCollect:
-		// collect 阶段只接受用户补充信息，目标是把草稿推进到“可确认”状态。
+		// collect 阶段默认接收用户补充信息，目标是把草稿推进到“可确认”状态。
+		// 但如果前端明确传 confirmed=false，也允许用户在补信息阶段直接放弃本次建单流程。
+		if resume, ok := info.ResumeData.(*ResumeConfirmData); ok && !resume.Confirmed {
+			result := &TicketExecutionResult{
+				Success: false,
+				Message: localizeText(state.Language, "用户取消提交工单", "Ticket submission was canceled by the user"),
+			}
+			return singleEventIter(finalAssistantEvent(
+				localizeText(state.Language, "已取消创建工单。", "Ticket creation has been canceled."),
+				result,
+			))
+		}
+
 		resume, ok := info.ResumeData.(*ResumeCollectData)
 		if !ok || strings.TrimSpace(resume.Answer) == "" {
 			pending := state.Pending

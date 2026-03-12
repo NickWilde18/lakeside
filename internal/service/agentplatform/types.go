@@ -12,6 +12,7 @@ import (
 const (
 	statusActive = "active"
 	statusDone   = "done"
+	statusDeleted = "deleted"
 )
 
 const (
@@ -80,6 +81,24 @@ type ResumeRunResult struct {
 type GetRunRequest struct {
 	AssistantKey string
 	RunID        string
+	UserUPN      string
+}
+
+type ListSessionsRequest struct {
+	AssistantKey string
+	UserUPN      string
+	Limit        int
+}
+
+type GetSessionRequest struct {
+	AssistantKey string
+	SessionID    string
+	UserUPN      string
+}
+
+type DeleteSessionRequest struct {
+	AssistantKey string
+	SessionID    string
 	UserUPN      string
 }
 
@@ -183,6 +202,38 @@ type RunSnapshot struct {
 	FinishedAt   time.Time
 }
 
+type SessionSummary struct {
+	AssistantKey  string
+	SessionID     string
+	Title         string
+	Status        string
+	ActivePath    []string
+	LastRunID     string
+	LastRunStatus string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+type SessionMessage struct {
+	ID           int64
+	Role         string
+	Content      string
+	ActivePath   []string
+	CheckpointID string
+	CreatedAt    time.Time
+}
+
+type RunTrace struct {
+	Snapshot *RunSnapshot
+	Events   []RunEventRecord
+}
+
+type SessionDetail struct {
+	Session  SessionSummary
+	Messages []SessionMessage
+	Runs     []RunTrace
+}
+
 type SessionRecord struct {
 	AssistantKey     string    `orm:"assistant_key"`
 	SessionID        string    `orm:"session_id"`
@@ -274,14 +325,18 @@ type MemoryJob struct {
 type Repository interface {
 	SaveSession(ctx context.Context, session SessionRecord) error
 	GetSession(ctx context.Context, sessionID string) (*SessionRecord, error)
+	ListSessions(ctx context.Context, assistantKey, userUPN string, limit int) ([]SessionRecord, error)
+	DeleteSession(ctx context.Context, assistantKey, sessionID, userUPN string, deletedAt time.Time) error
 	AppendMessage(ctx context.Context, message MessageRecord) (int64, error)
 	ListRecentMessages(ctx context.Context, sessionID string, limit int) ([]MessageRecord, error)
+	ListMessages(ctx context.Context, sessionID string) ([]MessageRecord, error)
 	CreateRun(ctx context.Context, run RunRecord) error
 	TryStartRun(ctx context.Context, runID string) (bool, error)
 	TryCancelQueuedRun(ctx context.Context, runID, responseJSON, errorMessage string, finishedAt time.Time) (bool, error)
 	UpdateRunStatus(ctx context.Context, runID, status string) error
 	FinishRun(ctx context.Context, runID, status, responseJSON, checkpointID, errorMessage string, finishedAt time.Time) error
 	GetRun(ctx context.Context, runID string) (*RunRecord, error)
+	ListRunsBySession(ctx context.Context, sessionID string) ([]RunRecord, error)
 	AppendRunEvent(ctx context.Context, event RunEventRecord) (int64, error)
 	ListRunEventsAfter(ctx context.Context, runID string, afterID int64) ([]RunEventRecord, error)
 	MarkStaleRunsFailed(ctx context.Context, errorMessage string, finishedAt time.Time) error

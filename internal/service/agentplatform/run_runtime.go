@@ -194,6 +194,7 @@ func (s *Service) finishRun(ctx context.Context, kind, assistantKey, sessionID, 
 	}
 
 	s.emitFinalRunEvent(ctx, status, resp, errorMessage)
+	s.logRunTimingSummary(ctx, runID, assistantKey, sessionID, status, createdAt, finishedAt)
 	g.Log().Infof(ctx, "agent run finished, assistant_key=%s run_id=%s session_id=%s run_status=%s flow_status=%s", assistantKey, runID, sessionID, status, resp.Status)
 }
 

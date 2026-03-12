@@ -44,7 +44,7 @@ func (s *Service) consumeIterator(ctx context.Context, assistantKey string, iter
 		}
 		if event.Err != nil {
 			g.Log().Errorf(ctx, "agentplatform event failed, assistant_key=%s session_id=%s checkpoint_id=%s err=%v", assistantKey, sessionID, checkpointID, event.Err)
-			return s.errorResponse(assistantKey, sessionID, pathOrDefault(path, assistantKey), event.Err.Error())
+			return s.errorResponse(assistantKey, sessionID, s.resolveNodePath(assistantKey, path, strings.TrimSpace(event.AgentName)), event.Err.Error())
 		}
 		if event.Output != nil && event.Output.CustomizedOutput != nil {
 			if result := legacyknowledge.ResultFromAny(event.Output.CustomizedOutput); result != nil {
@@ -63,6 +63,7 @@ func (s *Service) consumeIterator(ctx context.Context, assistantKey string, iter
 					"agent_name": result.AgentName,
 					"sources":    step.Sources,
 				})
+				emitSyntheticAgentCompleted(ctx, step.Path, result.AgentName, "Knowledge")
 			}
 			if (pathContains(path, "itsm") || strings.TrimSpace(event.AgentName) == "itsm") && legacyitsm.ExecutionResultFromAny(event.Output.CustomizedOutput) != nil {
 				result := legacyitsm.ExecutionResultFromAny(event.Output.CustomizedOutput)
@@ -182,6 +183,21 @@ func resultFromKnowledge(result *legacyknowledge.Result) *Result {
 	return &Result{Success: result.Success, Message: result.Message, Sources: sources}
 }
 
+func emitSyntheticAgentCompleted(ctx context.Context, path []string, agentName, agentType string) {
+	path = sanitizePath(path)
+	if len(path) == 0 {
+		return
+	}
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		agentName = path[len(path)-1]
+	}
+	eventctx.Emit(ctx, eventTypeAgentCompleted, path, agentName, g.Map{
+		"agent_name": agentName,
+		"agent_type": strings.TrimSpace(agentType),
+	})
+}
+
 func mergeSources(base, incoming []Source) []Source {
 	if len(incoming) == 0 {
 		return base
@@ -217,6 +233,9 @@ func runPathStrings(path []adk.RunStep) []string {
 		if name == "" {
 			continue
 		}
+		if isInternalWorkflowNode(name) {
+			continue
+		}
 		if len(out) > 0 && out[len(out)-1] == name {
 			continue
 		}
@@ -239,6 +258,7 @@ func pathContains(path []string, target string) bool {
 }
 
 func pathOrDefault(path []string, assistantKey string) []string {
+	path = sanitizePath(path)
 	if len(path) > 0 {
 		return append([]string(nil), path...)
 	}
@@ -283,6 +303,10 @@ func (s *Service) resolveNodePath(assistantKey string, currentPath []string, nod
 	}
 	for _, nodeKey := range nodeKeys {
 		candidate := s.registry.pathForNode(assistantKey, nodeKey)
+		if shouldPreferCandidatePath(best, candidate) {
+			best = candidate
+			continue
+		}
 		if len(candidate) > len(best) || (len(candidate) == len(best) && !pathMatchesAnyNode(best, nodeKeys)) {
 			best = candidate
 		}
@@ -293,6 +317,38 @@ func (s *Service) resolveNodePath(assistantKey string, currentPath []string, nod
 		}
 	}
 	return pathOrDefault(best, assistantKey)
+}
+
+func sanitizePath(path []string) []string {
+	if len(path) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(path))
+	for _, item := range path {
+		item = strings.TrimSpace(item)
+		if item == "" || isInternalWorkflowNode(item) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func isInternalWorkflowNode(name string) bool {
+	name = strings.TrimSpace(name)
+	return strings.HasPrefix(name, "__")
+}
+
+func shouldPreferCandidatePath(currentPath, candidate []string) bool {
+	currentPath = sanitizePath(currentPath)
+	candidate = sanitizePath(candidate)
+	if len(currentPath) == 0 || len(candidate) == 0 {
+		return false
+	}
+	if len(currentPath) <= len(candidate) {
+		return false
+	}
+	return currentPath[len(currentPath)-1] == candidate[len(candidate)-1]
 }
 
 func containsNodeKey(nodeKeys []string, target string) bool {

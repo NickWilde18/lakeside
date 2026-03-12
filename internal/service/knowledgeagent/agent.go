@@ -3,7 +3,9 @@ package knowledgeagent
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -14,6 +16,7 @@ import (
 	"github.com/gogf/gf/v2/frame/g"
 
 	"lakeside/internal/infra/ragclient"
+	"lakeside/internal/service/agentplatform/eventctx"
 )
 
 // NewKnowledgeAgent 创建一个绑定固定 kb_id 集合的知识子代理。
@@ -108,27 +111,78 @@ func (a *knowledgeAgent) Run(ctx context.Context, input *adk.AgentInput, _ ...ad
 		return singleEventIter(&adk.AgentEvent{Err: fmt.Errorf("empty user message")})
 	}
 	lang := detectUserLanguage(query)
+	g.Log().Infof(ctx, "knowledge agent run started, agent=%s query=%q lang=%s", a.name, query, lang)
+	eventctx.EmitForNode(ctx, "knowledge_run_started", a.name, "知识代理开始处理请求", g.Map{
+		"agent": a.name,
+		"query": query,
+		"lang":  lang,
+	})
 
 	docs, err := a.retriever.Retrieve(ctx, query, componentretriever.WithTopK(a.defaultTopK))
 	if err != nil {
+		g.Log().Warningf(ctx, "knowledge agent retrieve failed, agent=%s query=%q err=%v", a.name, query, err)
+		eventctx.EmitForNode(ctx, "knowledge_run_completed", a.name, "知识代理处理结束（检索失败）", g.Map{
+			"agent":   a.name,
+			"success": false,
+			"reason":  "retrieve_failed",
+			"error":   err.Error(),
+		})
 		message := localizeText(lang, "知识库检索暂时不可用，请稍后再试。", "The knowledge retrieval service is temporarily unavailable. Please try again later.")
 		return singleEventIter(finalKnowledgeEvent(message, &Result{AgentName: a.name, Success: false, Message: message}))
 	}
 	if len(docs) == 0 {
+		g.Log().Infof(ctx, "knowledge agent retrieve empty, agent=%s query=%q", a.name, query)
+		eventctx.EmitForNode(ctx, "knowledge_run_completed", a.name, "知识代理处理结束（无检索结果）", g.Map{
+			"agent":   a.name,
+			"success": false,
+			"reason":  "no_docs",
+		})
 		message := localizeText(lang, "当前知识库没有找到足够依据来回答这个问题。", "The current knowledge base does not contain enough evidence to answer this question.")
 		return singleEventIter(finalKnowledgeEvent(message, &Result{AgentName: a.name, Success: false, Message: message}))
 	}
+	g.Log().Infof(ctx, "knowledge agent retrieve completed, agent=%s query=%q docs=%d", a.name, query, len(docs))
 
 	userUPN := currentUserUPN(ctx)
 	a.attachFilenames(ctx, userUPN, docs)
 	contextDocs := truncateDocuments(docs, a.maxContextDocs)
+	g.Log().Infof(ctx, "knowledge agent answer generation started, agent=%s context_docs=%d", a.name, len(contextDocs))
+	answerStartedAt := time.Now()
+	eventctx.EmitForNode(ctx, "knowledge_answer_generation_started", a.name, "开始生成知识回答", g.Map{
+		"agent":        a.name,
+		"context_docs": len(contextDocs),
+	})
 	answerBody, err := a.generateAnswer(ctx, query, lang, contextDocs)
 	if err != nil {
+		g.Log().Warningf(ctx, "knowledge agent answer generation failed, agent=%s err=%v", a.name, err)
+		eventctx.EmitForNode(ctx, "knowledge_answer_generation_finished", a.name, "知识回答生成失败", g.Map{
+			"agent":       a.name,
+			"success":     false,
+			"duration_ms": time.Since(answerStartedAt).Milliseconds(),
+			"error":       err.Error(),
+		})
+		eventctx.EmitForNode(ctx, "knowledge_run_completed", a.name, "知识代理处理结束（回答生成失败）", g.Map{
+			"agent":   a.name,
+			"success": false,
+			"reason":  "answer_generation_failed",
+			"error":   err.Error(),
+		})
 		message := localizeText(lang, "知识回答生成失败，请稍后再试。", "Failed to generate a knowledge-based answer. Please try again later.")
 		return singleEventIter(finalKnowledgeEvent(message, &Result{AgentName: a.name, Success: false, Message: message}))
 	}
 	sources := sourcesFromDocuments(docs, a.sourceLimit)
+	eventctx.EmitForNode(ctx, "knowledge_answer_generation_finished", a.name, "知识回答生成完成", g.Map{
+		"agent":        a.name,
+		"success":      true,
+		"duration_ms":  time.Since(answerStartedAt).Milliseconds(),
+		"source_count": len(sources),
+	})
 	message := formatAnswerWithSources(strings.TrimSpace(answerBody), sources, lang)
+	g.Log().Infof(ctx, "knowledge agent run completed, agent=%s sources=%d", a.name, len(sources))
+	eventctx.EmitForNode(ctx, "knowledge_run_completed", a.name, "知识代理处理完成", g.Map{
+		"agent":        a.name,
+		"success":      true,
+		"source_count": len(sources),
+	})
 	return singleEventIter(finalKnowledgeEvent(message, &Result{AgentName: a.name, Success: true, Message: message, Sources: sources}))
 }
 
@@ -190,14 +244,144 @@ func (a *knowledgeAgent) generateAnswer(ctx context.Context, query, lang string,
 			"You are a campus IT knowledge base assistant. Answer only from the provided passages. Do not invent policies, steps, timelines, contacts, or conclusions. If the evidence is insufficient, say the current knowledge base does not contain enough evidence. Answer only the part supported by the passages. Do not proactively expand into ticket submission, manual support, or next-step workflow. Do not ask follow-up questions, do not invite the user to continue, and do not say things like 'I can help further'. Output only the answer body and do not append your own citation list.")),
 		schema.UserMessage(buildKnowledgePrompt(query, docs, lang)),
 	}
-	msg, err := a.chatModel.Generate(ctx, messages)
+	stream, err := a.chatModel.Stream(ctx, messages)
 	if err != nil {
-		return "", err
+		g.Log().Warningf(ctx, "knowledge stream unavailable, fallback to non-stream generate, agent=%s err=%v", a.name, err)
+		msg, genErr := a.chatModel.Generate(ctx, messages)
+		if genErr != nil {
+			return "", genErr
+		}
+		if msg == nil {
+			return "", fmt.Errorf("knowledge model returned empty content")
+		}
+		content := normalizeAssistantText(strings.TrimSpace(msg.Content))
+		if content == "" {
+			return "", fmt.Errorf("knowledge model returned empty content")
+		}
+		return content, nil
 	}
-	if msg == nil || strings.TrimSpace(msg.Content) == "" {
+	if stream == nil {
+		g.Log().Warningf(ctx, "knowledge stream unavailable (nil stream), fallback to non-stream generate, agent=%s", a.name)
+		msg, genErr := a.chatModel.Generate(ctx, messages)
+		if genErr != nil {
+			return "", genErr
+		}
+		if msg == nil {
+			return "", fmt.Errorf("knowledge model returned empty content")
+		}
+		content := normalizeAssistantText(strings.TrimSpace(msg.Content))
+		if content == "" {
+			return "", fmt.Errorf("knowledge model returned empty content")
+		}
+		return content, nil
+	}
+	defer stream.Close()
+
+	var answerBuilder strings.Builder
+	var deltaBuffer strings.Builder
+	var limiter punctuationBurstLimiter
+	seq := 0
+	lastFlush := time.Now()
+
+	flushChunk := func(force bool) {
+		if deltaBuffer.Len() == 0 {
+			return
+		}
+		delta := deltaBuffer.String()
+		deltaBuffer.Reset()
+		payload := g.Map{
+			"agent": a.name,
+			"seq":   seq,
+			"delta": delta,
+			"final": force,
+		}
+		eventctx.EmitForNode(ctx, "knowledge_answer_chunk", a.name, delta, payload)
+		seq++
+		lastFlush = time.Now()
+	}
+
+	const chunkEmitMinChars = 24
+	const chunkEmitMaxInterval = 120 * time.Millisecond
+
+	for {
+		msg, recvErr := stream.Recv()
+		if recvErr != nil {
+			if recvErr == io.EOF {
+				break
+			}
+			return "", recvErr
+		}
+		if msg == nil || msg.Content == "" {
+			continue
+		}
+		normalized := limiter.Apply(msg.Content)
+		if normalized == "" {
+			continue
+		}
+		answerBuilder.WriteString(normalized)
+		deltaBuffer.WriteString(normalized)
+		if deltaBuffer.Len() >= chunkEmitMinChars || time.Since(lastFlush) >= chunkEmitMaxInterval {
+			flushChunk(false)
+		}
+	}
+	flushChunk(true)
+
+	answerText := normalizeAssistantText(strings.TrimSpace(answerBuilder.String()))
+	if answerText == "" {
 		return "", fmt.Errorf("knowledge model returned empty content")
 	}
-	return strings.TrimSpace(msg.Content), nil
+	return answerText, nil
+}
+
+// punctuationBurstLimiter 用于压缩模型流式输出里连续的标点噪声。
+// 当前仅限幅 "!"、"！"、"?"、"？"，最多保留 3 个连续字符。
+type punctuationBurstLimiter struct {
+	last  rune
+	count int
+}
+
+func (l *punctuationBurstLimiter) Apply(text string) string {
+	if text == "" {
+		return ""
+	}
+	var builder strings.Builder
+	for _, r := range text {
+		if isLimitedPunctuation(r) {
+			if l.last == r {
+				l.count++
+			} else {
+				l.last = r
+				l.count = 1
+			}
+			if l.count > 3 {
+				continue
+			}
+			builder.WriteRune(r)
+			continue
+		}
+		l.last = r
+		l.count = 1
+		builder.WriteRune(r)
+	}
+	return builder.String()
+}
+
+func isLimitedPunctuation(r rune) bool {
+	switch r {
+	case '!', '！', '?', '？':
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeAssistantText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	var limiter punctuationBurstLimiter
+	return strings.TrimSpace(limiter.Apply(text))
 }
 
 func buildKnowledgePrompt(query string, docs []*schema.Document, lang string) string {
@@ -267,29 +451,16 @@ func buildSnippet(content string) string {
 	return strings.TrimSpace(string(runes[:maxRunes])) + "..."
 }
 
+// formatAnswerWithSources 返回展示给用户的知识回答正文。
+// 来源详情通过结构化 Sources 单独返回给前端/API 使用，这里不再把 kb_id/node_id 等内部标识拼进正文，
+// 避免用户看到无意义的内部主键，也避免正文和来源卡片重复。
 func formatAnswerWithSources(answer string, sources []Source, lang string) string {
 	answer = strings.TrimSpace(answer)
 	if answer == "" {
 		answer = localizeText(lang, "当前知识库没有足够依据来回答这个问题。", "The current knowledge base does not contain enough evidence to answer this question.")
 	}
-	if len(sources) == 0 {
-		return answer
-	}
-	var builder strings.Builder
-	builder.WriteString(answer)
-	builder.WriteString("\n\n")
-	builder.WriteString(localizeText(lang, "参考来源：\n", "Sources:\n"))
-	for i, source := range sources {
-		label := source.Filename
-		if strings.TrimSpace(label) == "" {
-			label = source.DocID
-		}
-		builder.WriteString(fmt.Sprintf("%d. %s (kb=%s, node=%s)", i+1, label, source.KBID, source.NodeID))
-		if i < len(sources)-1 {
-			builder.WriteString("\n")
-		}
-	}
-	return builder.String()
+	_ = sources
+	return answer
 }
 
 func metadataString(doc *schema.Document, key string) string {
