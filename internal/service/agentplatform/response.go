@@ -236,12 +236,9 @@ func runPathStrings(path []adk.RunStep) []string {
 		if isInternalWorkflowNode(name) {
 			continue
 		}
-		if len(out) > 0 && out[len(out)-1] == name {
-			continue
-		}
 		out = append(out, name)
 	}
-	return out
+	return normalizeVisiblePath(out)
 }
 
 func pathContains(path []string, target string) bool {
@@ -330,6 +327,32 @@ func sanitizePath(path []string) []string {
 			continue
 		}
 		out = append(out, item)
+	}
+	return normalizeVisiblePath(out)
+}
+
+func normalizeVisiblePath(path []string) []string {
+	if len(path) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(path))
+	indexByNode := make(map[string]int, len(path))
+	for _, item := range path {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if idx, ok := indexByNode[item]; ok {
+			out = out[:idx+1]
+			for key, value := range indexByNode {
+				if value > idx {
+					delete(indexByNode, key)
+				}
+			}
+			continue
+		}
+		out = append(out, item)
+		indexByNode[item] = len(out) - 1
 	}
 	return out
 }

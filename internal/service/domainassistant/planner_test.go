@@ -126,3 +126,39 @@ func TestPlannerHeuristicSubmitAndTroubleshootUsesKnowledgeThenITSM(t *testing.T
 	require.Equal(t, "campus_it_kb", plan.Steps[0].AgentKey)
 	require.Equal(t, "itsm", plan.Steps[1].AgentKey)
 }
+
+func TestPlannerHeuristicSubmitAfterTriedUsesITSMOnly(t *testing.T) {
+	p := &planner{
+		leaves: []LeafBinding{
+			{Key: "itsm", Kind: "itsm", Description: "正式工单", Interruptible: true},
+			{Key: "campus_it_kb", Kind: "knowledge", Description: "知识问答", Interruptible: false},
+		},
+		model: &fakeToolCallingModel{
+			content: `{"mode":"supervisor","steps":[]}`,
+		},
+	}
+
+	plan, err := p.Plan(context.Background(), "我尝试之后还是不行，提个工单吧。")
+	require.NoError(t, err)
+	require.Equal(t, planModeSequential, plan.Mode)
+	require.Len(t, plan.Steps, 1)
+	require.Equal(t, "itsm", plan.Steps[0].AgentKey)
+}
+
+func TestPlannerHeuristicExplicitSubmitUsesITSMOnlyWithoutGuidanceIntent(t *testing.T) {
+	p := &planner{
+		leaves: []LeafBinding{
+			{Key: "itsm", Kind: "itsm", Description: "正式工单", Interruptible: true},
+			{Key: "campus_it_kb", Kind: "knowledge", Description: "知识问答", Interruptible: false},
+		},
+		model: &fakeToolCallingModel{
+			content: `{"mode":"supervisor","steps":[]}`,
+		},
+	}
+
+	plan, err := p.Plan(context.Background(), "VPN 连不上，直接帮我提个工单。")
+	require.NoError(t, err)
+	require.Equal(t, planModeSequential, plan.Mode)
+	require.Len(t, plan.Steps, 1)
+	require.Equal(t, "itsm", plan.Steps[0].AgentKey)
+}

@@ -85,9 +85,10 @@ func (a *plannedAgent) Run(ctx context.Context, input *adk.AgentInput, opts ...a
 	} else {
 		g.Log().Infof(ctx, "domainassistant plan ready, domain=%s mode=%s steps=%s", a.key, strings.TrimSpace(plan.Mode), planSummary(plan))
 		eventctx.EmitForNode(ctx, "domain_plan_ready", a.key, "领域执行计划已生成", g.Map{
-			"domain": a.key,
-			"mode":   strings.TrimSpace(plan.Mode),
-			"steps":  planStepKeys(plan),
+			"domain":       a.key,
+			"mode":         strings.TrimSpace(plan.Mode),
+			"steps":        planStepKeys(plan),
+			"step_details": planStepDetails(plan),
 		})
 	}
 	a.storePlan(ctx, plan)
@@ -113,10 +114,11 @@ func (a *plannedAgent) Resume(ctx context.Context, info *adk.ResumeInfo, opts ..
 	}
 	g.Log().Infof(ctx, "domainassistant resume plan loaded, domain=%s mode=%s steps=%s", a.key, strings.TrimSpace(plan.Mode), planSummary(plan))
 	eventctx.EmitForNode(ctx, "domain_plan_ready", a.key, "已加载领域执行计划", g.Map{
-		"domain": a.key,
-		"mode":   strings.TrimSpace(plan.Mode),
-		"steps":  planStepKeys(plan),
-		"resume": true,
+		"domain":       a.key,
+		"mode":         strings.TrimSpace(plan.Mode),
+		"steps":        planStepKeys(plan),
+		"step_details": planStepDetails(plan),
+		"resume":       true,
 	})
 	return a.runWithPlan(ctx, nil, info, plan, opts...)
 }
@@ -146,9 +148,10 @@ func (a *plannedAgent) runWithPlan(ctx context.Context, input *adk.AgentInput, i
 		emitMode = planModeSequential
 	}
 	eventctx.EmitForNode(ctx, "domain_execute_started", a.key, "开始执行领域计划", g.Map{
-		"domain": a.key,
-		"mode":   emitMode,
-		"steps":  planStepKeys(plan),
+		"domain":       a.key,
+		"mode":         emitMode,
+		"steps":        planStepKeys(plan),
+		"step_details": planStepDetails(plan),
 	})
 	switch mode {
 	case "", planModeSequential:
@@ -278,6 +281,22 @@ func planStepKeys(plan domainExecutionPlan) []string {
 			continue
 		}
 		items = append(items, key)
+	}
+	return items
+}
+
+func planStepDetails(plan domainExecutionPlan) []g.Map {
+	items := make([]g.Map, 0, len(plan.Steps))
+	for _, step := range plan.Steps {
+		key := strings.TrimSpace(step.AgentKey)
+		reason := strings.TrimSpace(step.Reason)
+		if key == "" {
+			continue
+		}
+		items = append(items, g.Map{
+			"agent_key": key,
+			"reason":    reason,
+		})
 	}
 	return items
 }

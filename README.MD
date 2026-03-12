@@ -20,6 +20,11 @@ Lakeside 现在是一个多层 Agent 平台，而不是单一的 IT 助手服务
 
 当前仍保留 `/v1/itsm/agent/*` 作为叶子 agent 调试入口，不再作为主产品入口。
 
+`POST /v1/agent/{assistant_key}/runs` 请求体当前约定：
+
+- `message`：必填，用户本轮输入
+- `session_id`：可选；传入表示复用现有会话，不传表示新建会话
+
 ## 架构分层
 
 - `internal/service/agentplatform/`
@@ -54,7 +59,23 @@ Lakeside 现在是一个多层 Agent 平台，而不是单一的 IT 助手服务
 - `steps[]` 用于展示本轮依次发生了什么
 - `result.sources[]` 用于返回知识来源，包含 `filename`、`doc_id`、`node_id`、`snippet`、`score`
 - `interrupts[]` 当前主要来自 `itsm` 叶子 agent
-- `run_status` 用于表达运行态，例如 `queued`、`running`、`waiting_input`、`done`
+- `run_status` 用于表达运行态，例如 `queued`、`running`、`waiting_input`、`done`、`failed`、`cancelled`
+
+运行态约定：
+
+- 仅 `queued`、`running` 视为处理中
+- `waiting_input`、`done`、`failed`、`cancelled` 均视为非运行态
+
+## 会话续聊与上下文
+
+同一对话里继续提问，前端应复用已有 `session_id` 调用 `POST /runs`，后端会在同一个会话下创建新 run。
+
+当前上下文注入由两部分组成：
+
+- 长期记忆：`agent_memories`
+- 近程会话上下文：同会话最近若干条消息（当前默认最近 12 条并按长度截断）
+
+只有在用户显式开启新对话时，才不传 `session_id` 新建会话。
 
 ## 配置
 
@@ -113,6 +134,7 @@ Redis 在本仓库中是必需依赖。
 
 1. `POST /v1/agent/{assistant_key}/runs`
    - 立即返回 `run_id`、`session_id`
+   - 请求体支持可选 `session_id`：续聊复用会话，不传则新建会话
    - run 会进入 Redis Streams 队列，由 worker 异步消费
 2. `GET /v1/agent/{assistant_key}/runs/{run_id}/events`
    - 返回 `text/event-stream`
@@ -130,11 +152,16 @@ Redis 在本仓库中是必需依赖。
 当前已实现的结构化事件包括：
 
 - `run_started`
+- `domain_plan_started`
+- `domain_plan_ready`
+- `domain_execute_started`
+- `domain_supervisor_fallback`
 - `run_waiting_input`
 - `agent_entered`
 - `agent_completed`
 - `knowledge_retrieve_started`
 - `knowledge_retrieve_finished`
+- `knowledge_answer_chunk`
 - `knowledge_answer_ready`
 - `itsm_interrupt_emitted`
 - `itsm_done`
@@ -142,11 +169,21 @@ Redis 在本仓库中是必需依赖。
 - `run_failed`
 - `run_cancelled`
 
+其中领域计划相关事件的 payload 会携带：
+
+- `steps`：执行顺序
+- `step_details[]`：每个 step 的 `agent_key` 与 `reason`，用于解释路由决策原因
+
 队列可靠性语义：
 
 - worker 仅在 handler 成功后 `XACK`，失败消息会保留 pending
 - worker 启动后会通过 `XAUTOCLAIM` 回收 pending，避免崩溃后消息遗失
 - `TryStartRun` 保证同一个 run 只会被一个 worker 原子抢占执行
+
+断线重连约定：
+
+- 支持标准 `Last-Event-ID` 请求头
+- 同时支持 query 参数 `last_event_id`（便于网关或调试工具）
 
 ## 身份语义
 
@@ -193,6 +230,10 @@ knowledge 叶子 agent 负责：
 
 - 提交幂等保护
 - 相似问题聚合与服务级别升级
+
+中断取消约定：
+
+- `need_info` 与 `need_confirm` 阶段都支持通过 `resume.targets[interrupt_id].confirmed=false` 取消当前工单流程
 
 ## 启动
 

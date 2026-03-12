@@ -69,17 +69,22 @@ func (p *planner) planByHeuristic(userMessage string) (domainExecutionPlan, bool
 		return domainExecutionPlan{}, false
 	}
 
-	needsKnowledge := containsAny(msg,
-		"怎么办", "怎么处理", "如何处理", "怎么排查", "如何排查", "给我步骤", "排查建议", "安装指引", "为什么", "无法连接", "连不上", "打不开",
-		"how to", "what should i do", "troubleshoot", "troubleshooting", "guide", "instruction", "cannot connect",
+	wantsKnowledgeGuidance := containsAny(msg,
+		"怎么办", "怎么处理", "如何处理", "怎么排查", "如何排查", "排查", "先帮我排查", "先排查", "给我步骤", "请给步骤", "排查建议", "安装指引", "为什么", "原因是什么", "怎么解决",
+		"how to", "what should i do", "troubleshoot", "troubleshooting", "guide", "instruction", "why", "how can i fix",
 	)
 	explicitSubmit := containsAny(msg,
-		"帮我报修", "帮我提工单", "帮我提交工单", "现在报修", "现在提工单", "直接提单", "直接报修", "立刻报修", "马上报修", "请帮我报修", "先报修", "先提工单",
-		"report a ticket", "create ticket", "submit ticket", "open a ticket", "file a ticket",
+		"帮我报修", "帮我提工单", "帮我提交工单", "帮我开工单", "现在报修", "现在提工单", "提工单吧", "提个工单", "提交工单", "开工单", "开个工单",
+		"直接提单", "直接报修", "立刻报修", "马上报修", "请帮我报修", "先报修", "先提工单", "报修吧", "报个修", "报障吧", "我想报修", "我想提工单",
+		"report a ticket", "create ticket", "submit ticket", "open a ticket", "file a ticket", "raise a ticket",
 	)
 	askHowToReport := containsAny(msg,
 		"怎么报修", "如何报修", "报修流程", "报修入口", "怎么提工单", "如何提工单", "怎么投诉", "如何投诉", "投诉流程", "怎么反馈", "如何反馈",
 		"how to report", "how do i report", "how to submit", "reporting process", "ticket process",
+	)
+	knowledgeAlreadyTried := containsAny(msg,
+		"还是不行", "还是不可以", "还是失败", "依然不行", "仍然不行", "还是连不上", "还是打不开", "没用", "我试过了", "我尝试了", "尝试之后", "试了之后",
+		"still not working", "still doesn't work", "i tried", "i've tried", "no luck", "after trying",
 	)
 	hasProcessWords := containsAny(msg,
 		"报修", "工单", "提单", "报障", "投诉", "反馈",
@@ -96,9 +101,20 @@ func (p *planner) planByHeuristic(userMessage string) (domainExecutionPlan, bool
 		}, true
 	}
 
+	// 用户明确表示“前面的建议已经试过但仍然不行”，并且当前目的是发起正式流程时，
+	// 不要再重复调用 knowledge，直接进入 itsm。
+	if interruptKey != "" && hasProcessWords && (explicitSubmit || knowledgeAlreadyTried) && !wantsKnowledgeGuidance {
+		return domainExecutionPlan{
+			Mode: planModeSequential,
+			Steps: []domainPlanStep{
+				{AgentKey: interruptKey, Reason: "用户明确要求正式提交流程，不再重复知识排查"},
+			},
+		}, true
+	}
+
 	if explicitSubmit {
 		steps := make([]domainPlanStep, 0, 2)
-		if needsKnowledge && knowledgeKey != "" {
+		if wantsKnowledgeGuidance && knowledgeKey != "" {
 			steps = append(steps, domainPlanStep{AgentKey: knowledgeKey, Reason: "先给排查建议"})
 		}
 		if interruptKey != "" {
@@ -109,7 +125,7 @@ func (p *planner) planByHeuristic(userMessage string) (domainExecutionPlan, bool
 		}
 	}
 
-	if needsKnowledge && !hasProcessWords && knowledgeKey != "" {
+	if wantsKnowledgeGuidance && !hasProcessWords && knowledgeKey != "" {
 		return domainExecutionPlan{
 			Mode: planModeSequential,
 			Steps: []domainPlanStep{

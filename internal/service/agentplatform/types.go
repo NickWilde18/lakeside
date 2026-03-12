@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	statusActive = "active"
-	statusDone   = "done"
+	statusActive  = "active"
+	statusDone    = "done"
 	statusDeleted = "deleted"
 )
 
@@ -54,6 +54,7 @@ const (
 type CreateRunRequest struct {
 	AssistantKey string
 	UserUPN      string
+	SessionID    string
 	Message      string
 }
 

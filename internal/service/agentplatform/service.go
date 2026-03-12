@@ -217,6 +217,7 @@ func (s *Service) CreateRun(ctx context.Context, req *CreateRunRequest) (*Create
 	}
 	assistantKey := strings.TrimSpace(req.AssistantKey)
 	userUPN := strings.TrimSpace(req.UserUPN)
+	sessionID := strings.TrimSpace(req.SessionID)
 	message := strings.TrimSpace(req.Message)
 	bundle, ok := s.registry.bundles[assistantKey]
 	if !ok || bundle == nil || bundle.Runner == nil {
@@ -224,12 +225,38 @@ func (s *Service) CreateRun(ctx context.Context, req *CreateRunRequest) (*Create
 	}
 
 	startedAt := time.Now()
-	sessionID := "sess-" + uuid.NewString()
 	runID := "run-" + uuid.NewString()
 	checkpointID := genCheckpointID()
 	language := detectLanguage(message)
-
 	persistCtx := withoutCancel(ctx)
+
+	if sessionID == "" {
+		sessionID = "sess-" + uuid.NewString()
+	} else {
+		session, err := s.repo.GetSession(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		if session == nil || strings.TrimSpace(session.Status) == statusDeleted {
+			return nil, gerror.NewCodef(gcode.CodeNotFound, "session not found: %s", sessionID)
+		}
+		if session.AssistantKey != assistantKey || session.UserUPN != userUPN {
+			return nil, gerror.NewCode(gcode.CodeNotAuthorized, "session does not belong to current assistant/user")
+		}
+		runs, err := s.repo.ListRunsBySession(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		if len(runs) > 0 {
+			lastRun := runs[len(runs)-1]
+			switch strings.TrimSpace(lastRun.Status) {
+			case runStatusQueued, runStatusRunning, runStatusWaitingInput:
+				return nil, gerror.NewCodef(gcode.CodeInvalidOperation, "session %s still has unfinished run %s", sessionID, lastRun.RunID)
+			}
+		}
+		language = chooseLanguage(session.Language, language)
+	}
+
 	if err := s.repo.SaveSession(persistCtx, SessionRecord{
 		AssistantKey:     assistantKey,
 		SessionID:        sessionID,
@@ -534,12 +561,68 @@ func (s *Service) ClearMemories(ctx context.Context, req *ClearMemoriesRequest) 
 	return deleted, nil
 }
 
-func (s *Service) buildAssistantContext(ctx context.Context, assistantKey, userUPN string) (string, error) {
+func (s *Service) buildAssistantContext(ctx context.Context, assistantKey, userUPN, sessionID string) (string, error) {
 	memories, err := s.repo.ListMemories(ctx, strings.TrimSpace(assistantKey), strings.TrimSpace(userUPN), s.memoryLimit)
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(fmt.Sprintf("当前登录用户 UPN：%s\n当前顶层助手：%s\n长期记忆：%s", strings.TrimSpace(userUPN), strings.TrimSpace(assistantKey), joinMemories(memories))), nil
+	recentConversation := "无"
+	if strings.TrimSpace(sessionID) != "" {
+		messages, msgErr := s.repo.ListRecentMessages(ctx, strings.TrimSpace(sessionID), recentConversationContextLimit)
+		if msgErr != nil {
+			return "", msgErr
+		}
+		recentConversation = formatRecentConversation(messages)
+	}
+	return strings.TrimSpace(fmt.Sprintf(
+		"当前登录用户 UPN：%s\n当前顶层助手：%s\n长期记忆：%s\n近期会话：%s",
+		strings.TrimSpace(userUPN),
+		strings.TrimSpace(assistantKey),
+		joinMemories(memories),
+		recentConversation,
+	)), nil
+}
+
+const (
+	recentConversationContextLimit    = 12
+	recentConversationMessageMaxRunes = 280
+)
+
+func formatRecentConversation(messages []MessageRecord) string {
+	if len(messages) == 0 {
+		return "无"
+	}
+	lines := make([]string, 0, len(messages))
+	for _, message := range messages {
+		role := strings.TrimSpace(message.Role)
+		if role == "" {
+			continue
+		}
+		content := shortenContextText(message.Content, recentConversationMessageMaxRunes)
+		if content == "" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s: %s", role, content))
+	}
+	if len(lines) == 0 {
+		return "无"
+	}
+	return strings.Join(lines, "\n")
+}
+
+func shortenContextText(content string, limit int) string {
+	content = strings.TrimSpace(strings.ReplaceAll(content, "\n", " "))
+	if content == "" {
+		return ""
+	}
+	if limit <= 0 {
+		return content
+	}
+	runes := []rune(content)
+	if len(runes) <= limit {
+		return content
+	}
+	return string(runes[:limit]) + "..."
 }
 
 func (s *Service) buildResumeTargets(targets map[string]*itsmv1.ResumeTarget) (map[string]any, error) {

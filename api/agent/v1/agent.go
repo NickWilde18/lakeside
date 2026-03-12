@@ -54,9 +54,10 @@ type AgentRunSnapshot struct {
 
 // AgentRunCreateReq 发起一次新的 agent run。
 type AgentRunCreateReq struct {
-	g.Meta       `path:"/v1/agent/{assistant_key}/runs" tags:"Agent" method:"post" summary:"发起新的 agent run" dc:"按 assistant_key 选择顶层助手入口，创建一次异步执行 run。前端应随后通过 snapshot 或 SSE 事件流跟踪执行过程。" example:"{\"message\":\"VPN 连不上，顺便告诉我学生群组邮箱地址\"}"`
+	g.Meta       `path:"/v1/agent/{assistant_key}/runs" tags:"Agent" method:"post" summary:"发起新的 agent run" dc:"按 assistant_key 选择顶层助手入口，创建一次异步执行 run。若传 session_id，则表示在该历史会话里继续追问；不传则新建会话。前端应随后通过 snapshot 或 SSE 事件流跟踪执行过程。" example:"{\"message\":\"VPN 连不上，顺便告诉我学生群组邮箱地址\"}"`
 	AssistantKey string `json:"-" in:"path" param:"assistant_key" v:"required" dc:"顶层助手 key，对应路由路径参数 assistant_key" example:"campus"`
 	UserID       string `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID；Lakeside 会在服务端内部转换下游系统所需身份字段" example:"122020255@link.cuhk.edu.cn"`
+	SessionID    string `json:"session_id,omitempty" dc:"可选。已有会话 ID；传入后会在该会话内继续创建新的 query run，而不是新建 session" example:"sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5"`
 	Message      string `json:"message" v:"required" dc:"用户本轮输入内容" example:"VPN 连不上，顺便告诉我学生群组邮箱地址"`
 }
 

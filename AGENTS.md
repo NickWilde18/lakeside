@@ -38,6 +38,9 @@
 - knowledge 叶子 agent 不得靠硬编码“一轮只检索一次”来限制检索；如需扩召回，优先使用 Eino 官方检索组件，例如 `flow/retriever/multiquery`。
 - 未来 agent 体系按分层组织：`顶层助手 -> 领域助手 -> 叶子 agent`。目录设计应优先体现这三层结构，不再继续把所有 agent 平铺在 `internal/service` 根下。
 - 主产品入口统一使用 `/v1/agent/{assistant_key}/*`；旧 `/v1/assistant/*` 不再保留。
+- 变更 SSE `event_type` 或 payload 字段时，必须同步更新 `README.MD`、`TESTING.md` 与前端事件解析逻辑，三者缺一不可。
+- 在同一会话中继续提问时，`POST /v1/agent/{assistant_key}/runs` 必须传 `session_id` 复用会话；仅在显式新建对话时省略 `session_id`。
+- 前端运行态判断统一约定：`queued`、`running` 才显示处理中；`waiting_input`、`done`、`failed`、`cancelled` 均为非运行态，不显示 spinner。
 
 ## Testing Guidelines
 - Use Go `testing` package; `testify/require` is allowed and already used in this repo for concise assertions.

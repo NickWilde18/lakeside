@@ -58,7 +58,7 @@ func (s *Service) launchResumeRun(baseCtx context.Context, req *executeResumeReq
 }
 
 func (s *Service) executeQuery(ctx context.Context, req *executeQueryRequest) (*Response, error) {
-	assistantContext, err := s.buildAssistantContext(withoutCancel(ctx), req.AssistantKey, req.UserUPN)
+	assistantContext, err := s.buildAssistantContext(withoutCancel(ctx), req.AssistantKey, req.UserUPN, req.SessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +85,7 @@ func (s *Service) executeQuery(ctx context.Context, req *executeQueryRequest) (*
 }
 
 func (s *Service) executeResume(ctx context.Context, req *executeResumeRequest) (*Response, error) {
-	assistantContext, err := s.buildAssistantContext(withoutCancel(ctx), req.AssistantKey, req.UserUPN)
+	assistantContext, err := s.buildAssistantContext(withoutCancel(ctx), req.AssistantKey, req.UserUPN, req.SessionID)
 	if err != nil {
 		return nil, err
 	}

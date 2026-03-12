@@ -26,6 +26,18 @@ func TestRunPathStringsSkipsInternalWorkflowNodes(t *testing.T) {
 	require.Equal(t, []string{"campus", "it", "campus_it_kb_for_itso_student_assistant", "itsm"}, got)
 }
 
+func TestRunPathStringsNormalizesAncestorReturn(t *testing.T) {
+	path := []adk.RunStep{
+		newRunStepForTest("campus"),
+		newRunStepForTest("it"),
+		newRunStepForTest("campus_it_kb"),
+		newRunStepForTest("it"),
+	}
+
+	got := runPathStrings(path)
+	require.Equal(t, []string{"campus", "it"}, got)
+}
+
 func TestResolveNodePathPrefersRegistryPathOverWorkflowHistory(t *testing.T) {
 	svc := &Service{
 		registry: &runtimeRegistry{
@@ -43,6 +55,24 @@ func TestResolveNodePathPrefersRegistryPathOverWorkflowHistory(t *testing.T) {
 	currentPath := []string{"campus", "it", "__it_workflow", "campus_it_kb_for_itso_student_assistant", "itsm"}
 	got := svc.resolveNodePath("campus", currentPath, "itsm")
 	require.Equal(t, []string{"campus", "it", "itsm"}, got)
+}
+
+func TestResolveNodePathNormalizesReturnedChildPath(t *testing.T) {
+	svc := &Service{
+		registry: &runtimeRegistry{
+			paths: nodePathIndex{
+				"campus": {
+					"campus":       {"campus"},
+					"it":           {"campus", "it"},
+					"campus_it_kb": {"campus", "it", "campus_it_kb"},
+				},
+			},
+		},
+	}
+
+	currentPath := []string{"campus", "it", "campus_it_kb", "it"}
+	got := svc.resolveNodePath("campus", currentPath, "campus_it_kb", "it")
+	require.Equal(t, []string{"campus", "it", "campus_it_kb"}, got)
 }
 
 func TestConsumeIteratorEmitsKnowledgeAgentCompletedEvent(t *testing.T) {

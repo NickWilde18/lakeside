@@ -10,10 +10,11 @@ import (
 )
 
 func (c *ControllerV1) AgentRunCreate(ctx context.Context, req *v1.AgentRunCreateReq) (res *v1.AgentRunCreateRes, err error) {
-	g.Log().Infof(ctx, "agent run create request received, assistant_key=%s user_upn=%s message_len=%d", req.AssistantKey, req.UserID, len(req.Message))
+	g.Log().Infof(ctx, "agent run create request received, assistant_key=%s user_upn=%s session_id=%s message_len=%d", req.AssistantKey, req.UserID, req.SessionID, len(req.Message))
 	out, err := agentplatform.GetService(ctx).CreateRun(ctx, &agentplatform.CreateRunRequest{
 		AssistantKey: req.AssistantKey,
 		UserUPN:      req.UserID,
+		SessionID:    req.SessionID,
 		Message:      req.Message,
 	})
 	if err != nil {
