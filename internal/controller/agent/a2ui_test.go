@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	itsmv1 "lakeside/api/itsm/v1"
 	"lakeside/internal/service/agentplatform"
 )
 
@@ -120,4 +121,23 @@ func TestBuildPageMessagesSkipsRunningPlaceholderWhenRuntimeStreamsDraft(t *test
 	require.NotNil(t, latest)
 	require.Len(t, messages, 1)
 	require.Equal(t, "user", messages[0].Role)
+}
+
+func TestBuildChatComponentsAddsCancelButtonForNeedInfoInterrupt(t *testing.T) {
+	components := buildChatComponents(agentPageState{
+		RunStatus: "waiting_input",
+		PendingInterrupt: &itsmv1.AgentInterrupt{
+			Type:   "need_info",
+			Prompt: "请补充更多信息",
+		},
+	})
+
+	ids := make([]string, 0, len(components))
+	for _, component := range components {
+		ids = append(ids, component.ID)
+	}
+
+	require.Contains(t, ids, "interrupt-cancel")
+	require.Contains(t, ids, "interrupt-submit")
+	require.Contains(t, ids, "interrupt-actions")
 }

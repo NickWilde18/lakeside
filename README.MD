@@ -320,7 +320,49 @@ Redis 在本仓库中是**必需依赖**。
 
 生产环境不要把真实 `config.yaml` 打进镜像；建议通过 Secret / ConfigMap 挂载运行时配置文件。
 
-## 启动
+## 本地联调启动方式
+
+本地联调 `campus` 主产品时，通常不只是启动本仓库，还需要把依赖服务一起拉起来。当前推荐至少启动以下 5 个服务：
+
+| 顺序 | 服务 | 工作目录 | 为什么需要 |
+| --- | --- | --- | --- |
+| 1 | Redis | 任意 | `lakeside` 的 checkpoint、runtime queue、幂等和缓存依赖 Redis |
+| 2 | UniAuth 后端 | `../UniAuth/uniauth-gf` | ITSM 提交前需要把 `UPN -> employeeId` |
+| 3 | 对话后端 ChatGPT-Azure | `../ChatGPT-Azure` | 当前 UI 的配额池信息获取依赖它 |
+| 4 | Lakeside 后端 | 当前仓库 | 提供 `/v1/agent/{assistant_key}/render` 与 `/actions` |
+| 5 | UI 前端 | `../UI` | 主产品页面入口，默认本地开发地址是 `http://localhost:5173` |
+
+### 1. Redis
+
+本地联调前请先确保 Redis 已启动，并且 `lakeside` 能访问到配置中的 Redis 地址。
+
+### 2. UniAuth 后端
+
+工作目录：`../UniAuth/uniauth-gf`
+
+```bash
+go run .
+```
+
+也可以用 GoFrame CLI：
+
+```bash
+gf run main.go
+```
+
+### 3. ChatGPT-Azure 后端
+
+工作目录：`../ChatGPT-Azure`
+
+```bash
+uvicorn --host 0.0.0.0 --port 8000 ChatGPT_Azure.asgi:application --reload
+```
+
+当前主产品 UI 里的配额池信息获取依赖这个后端；如果它没启动，前端会出现相关请求失败。
+
+### 4. Lakeside 后端
+
+工作目录：当前仓库
 
 ```bash
 go run main.go
@@ -337,6 +379,34 @@ go run main.go
 - `http://127.0.0.1:8011`
 - OpenAPI: `http://127.0.0.1:8011/api.json`
 - Swagger: `http://127.0.0.1:8011/swagger/`
+
+### 5. UI 前端
+
+工作目录：`../UI`
+
+首次需要安装依赖：
+
+```bash
+pnpm install
+```
+
+启动开发服务器：
+
+```bash
+pnpm run dev
+```
+
+默认本地入口通常是：
+
+- `http://localhost:5173`
+
+## 仅启动 Lakeside 后端
+
+如果你只是调试本仓库本身，而不是跑完整的主产品联调，那么最低限度只需要先保证 Redis 可用，然后启动 `lakeside`：
+
+```bash
+go run main.go
+```
 
 ## 测试
 

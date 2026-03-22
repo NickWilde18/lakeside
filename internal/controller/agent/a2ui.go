@@ -498,10 +498,15 @@ func buildInterruptComponents(state agentPageState) []a2uiComponent {
 		textComponent("interrupt-body", literalString(strings.TrimSpace(interrupt.Prompt)), "body"),
 	}
 	if strings.TrimSpace(interrupt.Type) == "need_info" {
-		children = append(children, "interrupt-answer", "interrupt-submit")
+		children = append(children, "interrupt-answer", "interrupt-actions")
 		components = append(components,
 			textFieldComponent("interrupt-answer", nil, "/interrupt/answer", "补充信息", "longText"),
+			rowComponent("interrupt-actions", nil, "interrupt-cancel", "interrupt-submit"),
 		)
+		components = append(components, buttonComponents("interrupt-cancel", "中止当前流程", weightPtr(1), actionSpec("cancel_turn", map[string]any{
+			"sessionId": pathValue("/meta/sessionId"),
+			"runId":     pathValue("/interrupt/runId"),
+		}), "body")...)
 		components = append(components, buttonComponents("interrupt-submit", "提交补充信息", nil, actionSpec("follow_up_submit", map[string]any{
 			"sessionId":   pathValue("/meta/sessionId"),
 			"runId":       pathValue("/interrupt/runId"),
