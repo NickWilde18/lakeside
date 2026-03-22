@@ -203,7 +203,7 @@ func buildAgentPageState(ctx context.Context, svc *agentplatform.Service, assist
 	if err != nil {
 		return state, err
 	}
-	messages, latestSnapshot := buildPageMessages(detail)
+	messages, latestSnapshot := buildPageMessages(detail, !runtimeProvidesRunningMessage(runtime))
 	state.Messages = messages
 	if latestSnapshot != nil {
 		state.CurrentRunID = latestSnapshot.RunID
@@ -263,7 +263,22 @@ func isComposerBlockedStatus(status string) bool {
 	}
 }
 
-func buildPageMessages(detail *agentplatform.SessionDetail) ([]agentPageMessage, *agentplatform.RunSnapshot) {
+func runtimeProvidesRunningMessage(runtime *agentRuntimeOverlay) bool {
+	if runtime == nil {
+		return false
+	}
+	if strings.TrimSpace(runtime.DraftContent) != "" {
+		return true
+	}
+	switch chooseRuntimeStatus(runtime.DraftStatus) {
+	case "running", "queued":
+		return true
+	default:
+		return false
+	}
+}
+
+func buildPageMessages(detail *agentplatform.SessionDetail, includeRunningPlaceholder bool) ([]agentPageMessage, *agentplatform.RunSnapshot) {
 	if detail == nil {
 		return nil, nil
 	}
@@ -292,7 +307,7 @@ func buildPageMessages(detail *agentplatform.SessionDetail) ([]agentPageMessage,
 		}
 		messages = append(messages, item)
 	}
-	if latestSnapshot != nil && (latestSnapshot.RunStatus == "running" || latestSnapshot.RunStatus == "queued") {
+	if includeRunningPlaceholder && latestSnapshot != nil && (latestSnapshot.RunStatus == "running" || latestSnapshot.RunStatus == "queued") {
 		userCount := 0
 		assistantCount := 0
 		for _, message := range detail.Messages {

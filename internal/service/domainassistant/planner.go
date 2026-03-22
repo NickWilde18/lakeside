@@ -66,11 +66,14 @@ func (p *planner) Assess(ctx context.Context, userMessage string) (moduleapi.Ass
 }
 
 func (p *planner) Plan(ctx context.Context, userMessage string) (domainExecutionPlan, error) {
-	if p == nil || p.model == nil {
-		return domainExecutionPlan{}, fmt.Errorf("planner model is nil")
+	if p == nil {
+		return domainExecutionPlan{}, fmt.Errorf("planner is nil")
 	}
 	if plan, ok := p.planByHeuristic(userMessage); ok {
 		return p.normalizePlan(plan), nil
+	}
+	if p.model == nil {
+		return p.planFallbackOrError(userMessage, fmt.Errorf("planner model is nil"))
 	}
 	messages := []*schema.Message{
 		schema.SystemMessage(`你是 Lakeside 领域子代理执行计划器。你的任务不是回答用户问题，而是决定当前领域下应该按什么顺序调用哪些叶子能力。你必须只返回 JSON。`),
@@ -78,20 +81,24 @@ func (p *planner) Plan(ctx context.Context, userMessage string) (domainExecution
 	}
 	msg, err := p.model.Generate(ctx, messages)
 	if err != nil {
-		return domainExecutionPlan{}, err
+		return p.planFallbackOrError(userMessage, err)
 	}
 	if msg == nil || strings.TrimSpace(msg.Content) == "" {
-		return domainExecutionPlan{}, fmt.Errorf("planner returned empty content")
+		return p.planFallbackOrError(userMessage, fmt.Errorf("planner returned empty content"))
 	}
 	jsonText, err := findJSONObject(msg.Content)
 	if err != nil {
-		return domainExecutionPlan{}, err
+		return p.planFallbackOrError(userMessage, err)
 	}
 	plan, err := decodePlanJSON(jsonText)
 	if err != nil {
-		return domainExecutionPlan{}, err
+		return p.planFallbackOrError(userMessage, err)
 	}
-	return p.normalizePlan(plan), nil
+	normalized := p.normalizePlan(plan)
+	if strings.EqualFold(strings.TrimSpace(normalized.Mode), planModeSupervisor) || len(normalized.Steps) == 0 {
+		return p.planFallbackOrError(userMessage, fmt.Errorf("planner cannot derive executable plan"))
+	}
+	return normalized, nil
 }
 
 func (p *planner) assessByHeuristic(userMessage string) (moduleapi.Assessment, bool) {
@@ -160,7 +167,7 @@ func (p *planner) planByHeuristic(userMessage string) (domainExecutionPlan, bool
 	if msg == "" {
 		return domainExecutionPlan{}, false
 	}
-	knowledgeKey := p.primaryKnowledgeAgent()
+	knowledgeKey := p.preferredKnowledgeAgent(msg)
 	interruptKey := p.primaryInterruptibleAgent()
 	if knowledgeKey == "" && interruptKey == "" {
 		return domainExecutionPlan{}, false
@@ -169,6 +176,10 @@ func (p *planner) planByHeuristic(userMessage string) (domainExecutionPlan, bool
 	wantsKnowledgeGuidance := containsAny(msg,
 		"怎么办", "怎么处理", "如何处理", "怎么排查", "如何排查", "排查", "先帮我排查", "先排查", "给我步骤", "请给步骤", "排查建议", "安装指引", "为什么", "原因是什么", "怎么解决",
 		"how to", "what should i do", "troubleshoot", "troubleshooting", "guide", "instruction", "why", "how can i fix",
+	)
+	wantsKnowledgeLookup := containsAny(msg,
+		"是什么", "是啥", "是什么？", "多少", "几点", "哪里", "在哪", "在哪里", "地址", "入口", "链接", "流程", "要求", "规则", "说明", "文档", "邮箱地址", "群组邮箱", "邮箱群组",
+		"what is", "where is", "where can i", "which", "how many", "address", "link", "document", "faq",
 	)
 	explicitSubmit := containsAny(msg,
 		"帮我报修", "帮我提工单", "帮我提交工单", "帮我开工单", "现在报修", "现在提工单", "提工单吧", "提个工单", "提交工单", "开工单", "开个工单",
@@ -221,12 +232,12 @@ func (p *planner) planByHeuristic(userMessage string) (domainExecutionPlan, bool
 		}
 	}
 
-	if wantsKnowledgeGuidance && !hasProcessWords && knowledgeKey != "" {
+	if (wantsKnowledgeGuidance || wantsKnowledgeLookup) && !hasProcessWords && knowledgeKey != "" {
 		return domainExecutionPlan{
 			Mode: planModeSequential,
 			Steps: []domainPlanStep{{
 				AgentKey: knowledgeKey,
-				Reason:   "纯知识排查诉求",
+				Reason:   "纯知识查询诉求",
 			}},
 		}, true
 	}
@@ -234,18 +245,95 @@ func (p *planner) planByHeuristic(userMessage string) (domainExecutionPlan, bool
 	return domainExecutionPlan{}, false
 }
 
+func (p *planner) preferredKnowledgeAgent(msg string) string {
+	if p == nil {
+		return ""
+	}
+	if p.isStudentAssistantInternalKnowledgeRequest(msg) {
+		if key := p.matchingKnowledgeAgent(func(leaf LeafBinding) bool {
+			return containsAny(strings.ToLower(strings.TrimSpace(leaf.Key)), "itso", "student_assistant", "studentassistant") ||
+				containsAny(strings.ToLower(strings.TrimSpace(leaf.Description)), "itso", "学生助理", "内部")
+		}); key != "" {
+			return key
+		}
+	}
+	if key := p.matchingKnowledgeAgent(func(leaf LeafBinding) bool {
+		return !containsAny(strings.ToLower(strings.TrimSpace(leaf.Key)), "itso", "student_assistant", "studentassistant") &&
+			!containsAny(strings.ToLower(strings.TrimSpace(leaf.Description)), "itso", "学生助理", "内部")
+	}); key != "" {
+		return key
+	}
+	return p.primaryKnowledgeAgent()
+}
+
+func (p *planner) fallbackExecutablePlan(userMessage string) (domainExecutionPlan, bool) {
+	if p == nil {
+		return domainExecutionPlan{}, false
+	}
+	assessment, ok := p.assessByHeuristic(userMessage)
+	if !ok {
+		return domainExecutionPlan{}, false
+	}
+	assessment = p.normalizeAssessment(assessment)
+	if assessment.Status != moduleapi.AssessmentReady {
+		return domainExecutionPlan{}, false
+	}
+	msg := strings.ToLower(strings.TrimSpace(userMessage))
+	switch assessment.Phase {
+	case moduleapi.PhaseWrite:
+		if key := p.primaryInterruptibleAgent(); key != "" {
+			return domainExecutionPlan{
+				Mode: planModeSequential,
+				Steps: []domainPlanStep{{
+					AgentKey: key,
+					Reason:   "规划兜底：依据评估结果进入正式流程",
+				}},
+			}, true
+		}
+	case moduleapi.PhaseRead:
+		if key := p.preferredKnowledgeAgent(msg); key != "" {
+			return domainExecutionPlan{
+				Mode: planModeSequential,
+				Steps: []domainPlanStep{{
+					AgentKey: key,
+					Reason:   "规划兜底：依据评估结果进入知识查询",
+				}},
+			}, true
+		}
+	}
+	return domainExecutionPlan{}, false
+}
+
+func (p *planner) planFallbackOrError(userMessage string, cause error) (domainExecutionPlan, error) {
+	if fallback, ok := p.fallbackExecutablePlan(userMessage); ok {
+		return fallback, nil
+	}
+	return domainExecutionPlan{}, cause
+}
+
 func (p *planner) primaryKnowledgeAgent() string {
+	return p.matchingKnowledgeAgent(func(leaf LeafBinding) bool { return true })
+}
+
+func (p *planner) matchingKnowledgeAgent(match func(leaf LeafBinding) bool) string {
 	for _, leaf := range p.leaves {
 		key := strings.TrimSpace(leaf.Key)
 		if key == "" {
 			continue
 		}
 		kind := strings.ToLower(strings.TrimSpace(leaf.Kind))
-		if kind == "knowledge" || !leaf.Interruptible {
+		if (kind == "knowledge" || !leaf.Interruptible) && match(leaf) {
 			return key
 		}
 	}
 	return ""
+}
+
+func (p *planner) isStudentAssistantInternalKnowledgeRequest(msg string) bool {
+	return containsAny(msg,
+		"学生助理", "itso", "学生群组邮箱", "群组邮箱", "邮箱群组", "学生邮箱群组", "语料库", "引导话术", "内部规范", "内部手册",
+		"student assistant", "internal handbook", "internal guideline",
+	)
 }
 
 func (p *planner) primaryInterruptibleAgent() string {

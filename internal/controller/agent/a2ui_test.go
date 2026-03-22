@@ -88,11 +88,36 @@ func TestBuildPageMessagesAddsRunningPlaceholder(t *testing.T) {
 		}},
 	}
 
-	messages, latest := buildPageMessages(detail)
+	messages, latest := buildPageMessages(detail, true)
 	require.NotNil(t, latest)
 	require.Len(t, messages, 2)
 	require.Equal(t, "user", messages[0].Role)
 	require.Equal(t, "assistant", messages[1].Role)
 	require.Equal(t, "running", messages[1].Status)
 	require.Equal(t, "latest-running", messages[1].ID)
+}
+
+func TestBuildPageMessagesSkipsRunningPlaceholderWhenRuntimeStreamsDraft(t *testing.T) {
+	now := time.Date(2026, 3, 21, 15, 0, 0, 0, time.FixedZone("CST", 8*3600))
+	detail := &agentplatform.SessionDetail{
+		Messages: []agentplatform.SessionMessage{{
+			ID:        1,
+			Role:      "user",
+			Content:   "大学好多wifi要连接哪一个？",
+			CreatedAt: now,
+		}},
+		Runs: []agentplatform.RunTrace{{
+			Snapshot: &agentplatform.RunSnapshot{
+				RunID:        "run-1",
+				AssistantKey: "campus",
+				RunStatus:    "running",
+				SessionID:    "sess-1",
+			},
+		}},
+	}
+
+	messages, latest := buildPageMessages(detail, false)
+	require.NotNil(t, latest)
+	require.Len(t, messages, 1)
+	require.Equal(t, "user", messages[0].Role)
 }

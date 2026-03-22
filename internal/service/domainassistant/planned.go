@@ -149,6 +149,24 @@ func (a *plannedAgent) runClarifyOrError(ctx context.Context, input *adk.AgentIn
 			Prompt:          interrupt.Prompt,
 		}))
 	}
+	if err == nil && strings.Contains(strings.ToLower(strings.TrimSpace(planErr.Error())), "planner cannot derive executable plan") {
+		prompt := "请再补充一点信息，说明你要咨询的具体问题，或者你希望我执行的具体操作。"
+		if a != nil && a.planner != nil {
+			prompt = a.planner.defaultClarifyPrompt()
+		}
+		interrupt := &legacyitsm.TicketInterruptInfo{
+			Type:   "need_info",
+			Prompt: strings.TrimSpace(prompt),
+		}
+		eventctx.EmitForNode(ctx, "domain_clarify_needed", a.key, interrupt.Prompt, g.Map{
+			"domain": a.key,
+			"reason": strings.TrimSpace(planErr.Error()),
+		})
+		return singleEventIter(adk.StatefulInterrupt(ctx, interrupt, &moduleClarifyState{
+			OriginalMessage: message,
+			Prompt:          interrupt.Prompt,
+		}))
+	}
 	if err != nil {
 		return singleErrorIter(fmt.Errorf("domain assessment failed: %w", err))
 	}

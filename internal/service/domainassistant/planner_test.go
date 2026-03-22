@@ -2,6 +2,7 @@ package domainassistant
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/cloudwego/eino/components/model"
@@ -161,4 +162,77 @@ func TestPlannerHeuristicExplicitSubmitUsesITSMOnlyWithoutGuidanceIntent(t *test
 	require.Equal(t, planModeSequential, plan.Mode)
 	require.Len(t, plan.Steps, 1)
 	require.Equal(t, "itsm", plan.Steps[0].AgentKey)
+}
+
+func TestPlannerHeuristicPureKnowledgeLookupUsesKnowledgeOnly(t *testing.T) {
+	p := &planner{
+		leaves: []LeafBinding{
+			{Key: "itsm", Kind: "itsm", Description: "正式工单", Interruptible: true},
+			{Key: "campus_it_kb", Kind: "knowledge", Description: "知识问答", Interruptible: false},
+		},
+		model: &fakeToolCallingModel{
+			content: `{"mode":"supervisor","steps":[]}`,
+		},
+	}
+
+	plan, err := p.Plan(context.Background(), "学生邮箱群组地址是多少？")
+	require.NoError(t, err)
+	require.Equal(t, planModeSequential, plan.Mode)
+	require.Len(t, plan.Steps, 1)
+	require.Equal(t, "campus_it_kb", plan.Steps[0].AgentKey)
+}
+
+func TestPlannerHeuristicStudentAssistantInternalLookupUsesInternalKnowledgeLeaf(t *testing.T) {
+	p := &planner{
+		leaves: []LeafBinding{
+			{Key: "itsm", Kind: "itsm", Description: "正式工单", Interruptible: true},
+			{Key: "campus_it_kb", Kind: "knowledge", Description: "普通校园 IT 知识问答", Interruptible: false},
+			{Key: "campus_it_kb_for_itso_student_assistant", Kind: "knowledge", Description: "ITSO 学生助理内部知识问答", Interruptible: false},
+		},
+		model: &fakeToolCallingModel{
+			content: `{"mode":"supervisor","steps":[]}`,
+		},
+	}
+
+	plan, err := p.Plan(context.Background(), "学生群组邮箱地址是什么？")
+	require.NoError(t, err)
+	require.Equal(t, planModeSequential, plan.Mode)
+	require.Len(t, plan.Steps, 1)
+	require.Equal(t, "campus_it_kb_for_itso_student_assistant", plan.Steps[0].AgentKey)
+}
+
+func TestPlannerPlanFallsBackToKnowledgeWhenModelReturnsEmptySteps(t *testing.T) {
+	p := &planner{
+		leaves: []LeafBinding{
+			{Key: "itsm", Kind: "itsm", Description: "正式工单", Interruptible: true},
+			{Key: "campus_it_kb", Kind: "knowledge", Description: "普通校园 IT 知识问答", Interruptible: false},
+		},
+		model: &fakeToolCallingModel{
+			content: `{"mode":"sequential","steps":[]}`,
+		},
+	}
+
+	plan, err := p.Plan(context.Background(), "邮箱连不上")
+	require.NoError(t, err)
+	require.Equal(t, planModeSequential, plan.Mode)
+	require.Len(t, plan.Steps, 1)
+	require.Equal(t, "campus_it_kb", plan.Steps[0].AgentKey)
+}
+
+func TestPlannerPlanFallsBackToKnowledgeWhenModelGenerateFails(t *testing.T) {
+	p := &planner{
+		leaves: []LeafBinding{
+			{Key: "itsm", Kind: "itsm", Description: "正式工单", Interruptible: true},
+			{Key: "campus_it_kb", Kind: "knowledge", Description: "普通校园 IT 知识问答", Interruptible: false},
+		},
+		model: &fakeToolCallingModel{
+			err: fmt.Errorf("planner upstream timeout"),
+		},
+	}
+
+	plan, err := p.Plan(context.Background(), "邮箱连不上")
+	require.NoError(t, err)
+	require.Equal(t, planModeSequential, plan.Mode)
+	require.Len(t, plan.Steps, 1)
+	require.Equal(t, "campus_it_kb", plan.Steps[0].AgentKey)
 }
