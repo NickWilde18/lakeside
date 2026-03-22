@@ -1,0 +1,11 @@
+.git
+.github
+.gitignore
+.playwright
+.playwright-cli
+temp
+tmp
+runtime
+manifest/config/config.yaml
+*.db
+*.log

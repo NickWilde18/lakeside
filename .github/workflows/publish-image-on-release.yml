@@ -1,0 +1,40 @@
+name: Publish Docker Image On Release
+
+on:
+  release:
+    types:
+      - published
+
+jobs:
+  parse-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version_tag: ${{ steps.parse.outputs.version_tag }}
+      publish_latest: ${{ steps.parse.outputs.publish_latest }}
+    steps:
+      - name: Parse release tag
+        id: parse
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag_name="${{ github.event.release.tag_name }}"
+          if [[ -z "${tag_name}" ]]; then
+            echo "release tag is empty" >&2
+            exit 1
+          fi
+
+          echo "version_tag=${tag_name}" >> "${GITHUB_OUTPUT}"
+
+          if [[ "${{ github.event.release.prerelease }}" == "true" ]]; then
+            echo "publish_latest=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "publish_latest=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+  build-and-push:
+    needs: parse-release
+    uses: ./.github/workflows/build-publish-image.yml
+    with:
+      version_tag: ${{ needs.parse-release.outputs.version_tag }}
+      publish_latest: ${{ needs.parse-release.outputs.publish_latest == 'true' }}
