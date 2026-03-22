@@ -58,6 +58,17 @@ type CreateRunRequest struct {
 	Message      string
 }
 
+type CreateSessionRequest struct {
+	AssistantKey string
+	UserUPN      string
+	Language     string
+}
+
+type CreateSessionResult struct {
+	AssistantKey string
+	SessionID    string
+}
+
 type CreateRunResult struct {
 	AssistantKey string
 	RunID        string
@@ -328,6 +339,7 @@ type Repository interface {
 	GetSession(ctx context.Context, sessionID string) (*SessionRecord, error)
 	ListSessions(ctx context.Context, assistantKey, userUPN string, limit int) ([]SessionRecord, error)
 	DeleteSession(ctx context.Context, assistantKey, sessionID, userUPN string, deletedAt time.Time) error
+	PurgeDeletedSessions(ctx context.Context, olderThan time.Time, limit int) (int, error)
 	AppendMessage(ctx context.Context, message MessageRecord) (int64, error)
 	ListRecentMessages(ctx context.Context, sessionID string, limit int) ([]MessageRecord, error)
 	ListMessages(ctx context.Context, sessionID string) ([]MessageRecord, error)
@@ -356,6 +368,12 @@ type config struct {
 			User   string
 			Pass   string
 			DBName string
+		}
+		Cleanup struct {
+			Enabled               bool
+			IntervalMinutes       int
+			DeletedRetentionHours int
+			BatchSize             int
 		}
 	}
 	Checkpoint struct {

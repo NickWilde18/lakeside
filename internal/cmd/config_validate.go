@@ -112,9 +112,10 @@ type agentsConfig struct {
 }
 
 type agentsStorageConfig struct {
-	Provider   string            `json:"provider"`
-	SQLitePath string            `json:"sqlitePath"`
-	MSSQL      agentsMSSQLConfig `json:"mssql"`
+	Provider   string                     `json:"provider"`
+	SQLitePath string                     `json:"sqlitePath"`
+	MSSQL      agentsMSSQLConfig          `json:"mssql"`
+	Cleanup    agentsStorageCleanupConfig `json:"cleanup" v:"required"`
 }
 
 type agentsMSSQLConfig struct {
@@ -123,6 +124,13 @@ type agentsMSSQLConfig struct {
 	User     string `json:"user"`
 	Password string `json:"password"`
 	Database string `json:"database"`
+}
+
+type agentsStorageCleanupConfig struct {
+	Enabled               bool `json:"enabled"`
+	IntervalMinutes       int  `json:"intervalMinutes" v:"required|min:1|max:10080#agents.storage.cleanup.intervalMinutes 不能为空|agents.storage.cleanup.intervalMinutes 至少为 1 分钟|agents.storage.cleanup.intervalMinutes 不能超过 10080 分钟"`
+	DeletedRetentionHours int  `json:"deletedRetentionHours" v:"required|min:1|max:8760#agents.storage.cleanup.deletedRetentionHours 不能为空|agents.storage.cleanup.deletedRetentionHours 至少为 1 小时|agents.storage.cleanup.deletedRetentionHours 不能超过 8760 小时"`
+	BatchSize             int  `json:"batchSize" v:"required|min:1|max:10000#agents.storage.cleanup.batchSize 不能为空|agents.storage.cleanup.batchSize 至少为 1|agents.storage.cleanup.batchSize 不能超过 10000"`
 }
 
 type agentsRuntimeConfig struct {

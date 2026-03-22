@@ -74,7 +74,7 @@ func TestPlannerNormalizeDropsUnknownAndDuplicateSteps(t *testing.T) {
 	require.Equal(t, "itsm", plan.Steps[1].AgentKey)
 }
 
-func TestPlannerNormalizeFallsBackToSupervisorWhenNoValidSteps(t *testing.T) {
+func TestPlannerNormalizeKeepsSequentialWhenNoValidSteps(t *testing.T) {
 	p := &planner{
 		leaves: []LeafBinding{
 			{Key: "itsm", Kind: "itsm", Description: "正式工单", Interruptible: true},
@@ -86,7 +86,7 @@ func TestPlannerNormalizeFallsBackToSupervisorWhenNoValidSteps(t *testing.T) {
 		Steps: []domainPlanStep{{AgentKey: "missing"}},
 	})
 
-	require.Equal(t, planModeSupervisor, plan.Mode)
+	require.Equal(t, planModeSequential, plan.Mode)
 	require.Empty(t, plan.Steps)
 }
 

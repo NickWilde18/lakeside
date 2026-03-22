@@ -52,86 +52,42 @@ type AgentRunSnapshot struct {
 	FinishedAt   string                  `json:"finished_at,omitempty" dc:"run 结束时间；未结束时为空" example:"2026-03-11T21:30:12+08:00"`
 }
 
-// AgentRunCreateReq 发起一次新的 agent run。
-type AgentRunCreateReq struct {
-	g.Meta       `path:"/v1/agent/{assistant_key}/runs" tags:"Agent" method:"post" summary:"发起新的 agent run" dc:"按 assistant_key 选择顶层助手入口，创建一次异步执行 run。若传 session_id，则表示在该历史会话里继续追问；不传则新建会话。前端应随后通过 snapshot 或 SSE 事件流跟踪执行过程。" example:"{\"message\":\"VPN 连不上，顺便告诉我学生群组邮箱地址\"}"`
-	AssistantKey string `json:"-" in:"path" param:"assistant_key" v:"required" dc:"顶层助手 key，对应路由路径参数 assistant_key" example:"campus"`
-	UserID       string `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID；Lakeside 会在服务端内部转换下游系统所需身份字段" example:"122020255@link.cuhk.edu.cn"`
-	SessionID    string `json:"session_id,omitempty" dc:"可选。已有会话 ID；传入后会在该会话内继续创建新的 query run，而不是新建 session" example:"sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5"`
-	Message      string `json:"message" v:"required" dc:"用户本轮输入内容" example:"VPN 连不上，顺便告诉我学生群组邮箱地址"`
+type AgentClientEvent struct {
+	UserAction *AgentUserAction `json:"userAction,omitempty" dc:"A2UI client event；当前仅支持 userAction"`
+	Error      map[string]any   `json:"error,omitempty" dc:"客户端错误上报；当前仅透传记录"`
 }
 
-// AgentRunCreateRes 表示 run 创建成功后的最小返回。
-type AgentRunCreateRes struct {
-	AssistantKey string `json:"assistant_key" dc:"当前顶层助手 key" example:"campus"`
-	RunID        string `json:"run_id" dc:"新创建的 run ID" example:"run-8f4b6d3b"`
-	SessionID    string `json:"session_id" dc:"本次 run 所属会话 ID；query 新建会话，resume 复用原会话" example:"sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5"`
-	RunStatus    string `json:"run_status" dc:"当前 run 状态，初始一般为 queued 或 running" example:"queued"`
+type AgentUserAction struct {
+	Name              string         `json:"name" dc:"动作名称，例如 send_message、follow_up_submit、approval_submit、cancel_turn；历史会话切换和删除默认由前端通过独立 sessions JSON API 处理" example:"send_message"`
+	SurfaceID         string         `json:"surfaceId,omitempty" dc:"动作来源 surface ID" example:"agent-canvas-campus"`
+	SourceComponentID string         `json:"sourceComponentId,omitempty" dc:"触发动作的组件 ID" example:"composer-send-btn"`
+	Timestamp         string         `json:"timestamp,omitempty" dc:"客户端动作时间戳" example:"2026-03-21T14:00:00Z"`
+	Context           map[string]any `json:"context,omitempty" dc:"动作附带上下文，由客户端解析 action.context 后回传"`
 }
 
-// AgentRunGetReq 获取一次 run 的快照。
-type AgentRunGetReq struct {
-	g.Meta       `path:"/v1/agent/{assistant_key}/runs/{run_id}" tags:"Agent" method:"get" summary:"查看 agent run 快照" dc:"返回当前 run 的完整快照，包括步骤、interrupt 和最终结果。"`
-	AssistantKey string `json:"-" in:"path" param:"assistant_key" v:"required" dc:"顶层助手 key" example:"campus"`
-	RunID        string `json:"-" in:"path" param:"run_id" v:"required" dc:"run ID" example:"run-8f4b6d3b"`
-	UserID       string `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID" example:"122020255@link.cuhk.edu.cn"`
+type AgentRenderReq struct {
+	g.Meta        `path:"/v1/agent/{assistant_key}/render" tags:"Agent" method:"get" summary:"渲染 agent 聊天区 A2UI surface" dc:"返回 application/x-ndjson 的 A2UI 消息流，只负责中间对话区的动态内容。页面壳子、历史会话列表和高级轨迹面板由前端单独管理。若传 session_id，则恢复该会话的聊天 surface；不传则渲染未选中会话的空态。"`
+	AssistantKey  string `json:"-" in:"path" param:"assistant_key" v:"required" dc:"顶层助手 key" example:"campus"`
+	UserID        string `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID" example:"122020255@link.cuhk.edu.cn"`
+	SessionID     string `json:"session_id,omitempty" in:"query" dc:"可选，会话 ID；用于恢复指定会话页面" example:"sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5"`
+	AdvancedTrace bool   `json:"advanced_trace,omitempty" in:"query" dc:"保留调试开关；不影响页面壳子，执行轨迹默认由前端通过独立 sessions 详情接口拉取" example:"false"`
 }
 
-// AgentRunGetRes 返回单个 run 的完整快照。
-type AgentRunGetRes struct {
-	AgentRunSnapshot
+type AgentRenderRes struct {
+	Placeholder string `json:"placeholder,omitempty" dc:"render 接口返回 application/x-ndjson，本结构仅用于满足 GoFrame XxxRes 命名要求"`
 }
 
-// AgentRunResumeReq 继续一个 waiting_input 的 run。
-type AgentRunResumeReq struct {
-	g.Meta       `path:"/v1/agent/{assistant_key}/runs/{run_id}/resume" tags:"Agent" method:"post" summary:"继续一个 waiting_input 的 agent run" dc:"当前典型场景是继续 ITSM 子代理产生的 interrupt。前端只需要传 targets；session_id 和 checkpoint_id 由服务端根据 run_id 找回。"`
-	AssistantKey string                          `json:"-" in:"path" param:"assistant_key" v:"required" dc:"顶层助手 key" example:"campus"`
-	RunID        string                          `json:"-" in:"path" param:"run_id" v:"required" dc:"waiting_input 的 run ID" example:"run-8f4b6d3b"`
-	UserID       string                          `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID" example:"122020255@link.cuhk.edu.cn"`
-	Targets      map[string]*itsmv1.ResumeTarget `json:"targets" v:"required" dc:"继续当前流程所需的恢复输入集合，值类型为 lakeside.api.itsm.v1.ResumeTarget" example:"{\"6819cf6c-ea98-49d2-82b3-3e7cbcbc90b7\":{\"confirmed\":true}}"`
+type AgentActionsReq struct {
+	g.Meta        `path:"/v1/agent/{assistant_key}/actions" tags:"Agent" method:"post" summary:"提交聊天区 A2UI 用户动作并返回增量 UI 消息流" dc:"接收 A2UI client event（当前主要是 userAction），返回 application/x-ndjson 的 A2UI 消息流。该接口只驱动聊天区中的消息、表单和 interrupt 卡片，不负责整页壳子。复杂动作如 send_message / follow_up_submit / approval_submit 会在同一个响应流里逐步返回聊天区增量更新。"`
+	AssistantKey  string           `json:"-" in:"path" param:"assistant_key" v:"required" dc:"顶层助手 key" example:"campus"`
+	UserID        string           `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID" example:"122020255@link.cuhk.edu.cn"`
+	AdvancedTrace bool             `json:"advanced_trace,omitempty" in:"query" dc:"保留调试开关；高级轨迹默认由前端通过 sessions 详情接口单独展示" example:"false"`
+	UserAction    *AgentUserAction `json:"userAction,omitempty" dc:"用户动作"`
+	Error         map[string]any   `json:"error,omitempty" dc:"客户端错误上报"`
 }
 
-// AgentRunResumeRes 表示 resume 创建的新 run。
-type AgentRunResumeRes struct {
-	AssistantKey string `json:"assistant_key" dc:"当前顶层助手 key" example:"campus"`
-	RunID        string `json:"run_id" dc:"新创建的 resume run ID" example:"run-01234567"`
-	SessionID    string `json:"session_id" dc:"resume 复用的会话 ID" example:"sess-4f8e3652-30ff-4d84-99ea-5df7b359af80"`
-	RunStatus    string `json:"run_status" dc:"当前 run 状态，初始一般为 queued 或 running" example:"queued"`
-}
-
-// AgentRunCancelReq 取消当前运行中的 run。
-type AgentRunCancelReq struct {
-	g.Meta       `path:"/v1/agent/{assistant_key}/runs/{run_id}/cancel" tags:"Agent" method:"post" summary:"取消当前运行中的 run" dc:"仅适用于 queued 或 running 的 run；已进入 waiting_input 的 run 不能通过此接口取消。"`
-	AssistantKey string `json:"-" in:"path" param:"assistant_key" v:"required" dc:"顶层助手 key" example:"campus"`
-	RunID        string `json:"-" in:"path" param:"run_id" v:"required" dc:"run ID" example:"run-8f4b6d3b"`
-	UserID       string `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID" example:"122020255@link.cuhk.edu.cn"`
-}
-
-// AgentRunCancelResult 表示 run 取消结果。
-type AgentRunCancelResult struct {
-	Cancelled bool `json:"cancelled" dc:"是否已发出取消请求" example:"true"`
-}
-
-// AgentRunCancelRes 表示 run 取消接口返回。
-type AgentRunCancelRes struct {
-	AssistantKey string               `json:"assistant_key" dc:"当前顶层助手 key" example:"campus"`
-	RunID        string               `json:"run_id" dc:"被取消的 run ID" example:"run-8f4b6d3b"`
-	Result       AgentRunCancelResult `json:"result" dc:"取消结果"`
-}
-
-// AgentRunEventsReq 订阅一次 run 的 SSE 事件流。
-type AgentRunEventsReq struct {
-	g.Meta       `path:"/v1/agent/{assistant_key}/runs/{run_id}/events" tags:"Agent" method:"get" summary:"订阅 run 的 SSE 事件流" dc:"返回 text/event-stream。支持浏览器 Last-Event-ID 断线重连；事件流会先回放数据库中已有事件，再实时推送后续事件。事件覆盖 run 生命周期、domain 规划阶段、knowledge 检索/生成阶段和 ITSM 中断阶段。"`
-	AssistantKey string `json:"-" in:"path" param:"assistant_key" v:"required" dc:"顶层助手 key" example:"campus"`
-	RunID        string `json:"-" in:"path" param:"run_id" v:"required" dc:"run ID" example:"run-8f4b6d3b"`
-	UserID       string `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID" example:"122020255@link.cuhk.edu.cn"`
-	LastEventID  int64  `json:"-" in:"header" param:"Last-Event-ID" dc:"可选。SSE 断线重连时从该事件 ID 之后继续回放；浏览器 EventSource 重连时会自动携带。"`
-	LastEventQID int64  `json:"last_event_id,omitempty" in:"query" dc:"可选。与 Last-Event-ID 语义一致，便于 curl 或网关转发场景手动传参。" example:"12"`
-}
-
-// AgentRunEventsRes 是 SSE 事件流接口的占位响应结构。
-type AgentRunEventsRes struct {
-	Placeholder string `json:"placeholder,omitempty" dc:"SSE 接口返回 text/event-stream，本结构仅用于满足 GoFrame XxxRes 命名要求"`
+type AgentActionsRes struct {
+	Placeholder string `json:"placeholder,omitempty" dc:"actions 接口返回 application/x-ndjson，本结构仅用于满足 GoFrame XxxRes 命名要求"`
 }
 
 // AgentRunEvent 表示 run 事件流中的一条结构化事件。
@@ -158,6 +114,17 @@ type AgentSessionSummary struct {
 	LastRunStatus string   `json:"last_run_status,omitempty" dc:"当前会话最近一次 run 状态" example:"waiting_input"`
 	CreatedAt     string   `json:"created_at,omitempty" dc:"会话创建时间" example:"2026-03-12T00:15:00+08:00"`
 	UpdatedAt     string   `json:"updated_at,omitempty" dc:"会话更新时间" example:"2026-03-12T00:18:00+08:00"`
+}
+
+type AgentSessionCreateReq struct {
+	g.Meta       `path:"/v1/agent/{assistant_key}/sessions" tags:"Agent" method:"post" summary:"创建一个空白 agent 会话" dc:"返回一个新的会话 ID，供前端显式新建对话时使用。当前仅创建空白会话，不触发执行。"`
+	AssistantKey string `json:"-" in:"path" param:"assistant_key" v:"required" dc:"顶层助手 key" example:"campus"`
+	UserID       string `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID" example:"122020255@link.cuhk.edu.cn"`
+}
+
+type AgentSessionCreateRes struct {
+	AssistantKey string `json:"assistant_key" dc:"当前顶层助手 key" example:"campus"`
+	SessionID    string `json:"session_id" dc:"新创建的会话 ID" example:"sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5"`
 }
 
 // AgentSessionsReq 查看某个顶层助手的历史会话列表。
@@ -212,7 +179,7 @@ type AgentSessionDetailRes struct {
 
 // AgentSessionDeleteReq 删除一个历史会话。
 type AgentSessionDeleteReq struct {
-	g.Meta       `path:"/v1/agent/{assistant_key}/sessions/{session_id}" tags:"Agent" method:"delete" summary:"删除一个 agent 历史会话" dc:"默认做软删除，只从当前用户历史列表里移除该会话；为了避免破坏当前流程，不允许删除 queued、running 或 waiting_input 状态的会话。"`
+	g.Meta       `path:"/v1/agent/{assistant_key}/sessions/{session_id}" tags:"Agent" method:"delete" summary:"删除一个 agent 历史会话" dc:"默认做软删除，只从当前用户历史列表里移除该会话；queued、running 状态不允许删除；waiting_input 状态允许删除，但会同时放弃当前 pending interrupt、使 checkpoint 不可恢复，并把最近一次 run 记为 cancelled。后台 cleanup worker 会在保留期后物理清理 deleted 会话及其消息、run、run event。"`
 	AssistantKey string `json:"-" in:"path" param:"assistant_key" v:"required" dc:"顶层助手 key" example:"campus"`
 	SessionID    string `json:"-" in:"path" param:"session_id" v:"required" dc:"历史会话 ID" example:"sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5"`
 	UserID       string `json:"-" in:"header" param:"X-User-ID" v:"required" dc:"当前登录用户 UPN，请求头 X-User-ID" example:"122020255@link.cuhk.edu.cn"`
@@ -274,111 +241,6 @@ type AgentMemoriesClearRes struct {
 }
 
 var (
-	AgentRunCreateReqExample = g.Map{
-		"message": "VPN 连不上，顺便告诉我学生群组邮箱地址。",
-	}
-	AgentRunCreateResExamples = goai.Examples{
-		"created": {
-			Value: &goai.Example{
-				Summary: "成功创建一个新的 run",
-				Value: g.Map{
-					"code":    0,
-					"message": "",
-					"data": g.Map{
-						"assistant_key": "campus",
-						"run_id":        "run-8f4b6d3b",
-						"session_id":    "sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5",
-						"run_status":    "queued",
-					},
-				},
-			},
-		},
-	}
-	AgentRunGetResExamples = goai.Examples{
-		"waiting_input": {
-			Value: &goai.Example{
-				Summary: "knowledge + ITSM interrupt 的 run 快照",
-				Value: g.Map{
-					"code":    0,
-					"message": "",
-					"data": g.Map{
-						"run_id":        "run-8f4b6d3b",
-						"assistant_key": "campus",
-						"run_status":    "waiting_input",
-						"status":        "need_info",
-						"session_id":    "sess-a925e3c0-8f4b-4daf-bbe3-1885afd915c5",
-						"checkpoint_id": "ckpt-b64cb049-85a8-433a-a5b7-fb5ad6d2b0f0",
-						"active_path":   []string{"campus", "it", "itsm"},
-						"started_at":    "2026-03-11T21:30:00+08:00",
-						"finished_at":   "2026-03-11T21:30:12+08:00",
-						"steps": []g.Map{{
-							"path":    []string{"campus", "it", "campus_it_kb"},
-							"kind":    "knowledge",
-							"message": "如果是宿舍 WiFi 无法访问校内资源，可先确认是否是设备问题或局部故障。若需要继续报修，请补充地点与故障现象。",
-						}, {
-							"path": []string{"campus", "it", "itsm"},
-							"kind": "itsm_interrupt",
-							"interrupts": []g.Map{{
-								"interrupt_id":   "83120df4-a30d-44a4-b958-98a94689b8c7",
-								"type":           "need_info",
-								"prompt":         "信息还不完整，请补充：问题描述。补充说明：请提供寝室具体位置（楼号、房间号）及故障现象。",
-								"missing_fields": []string{"othersDesc"},
-							}},
-						}},
-					},
-				},
-			},
-		},
-	}
-	AgentRunResumeReqExamples = goai.Examples{
-		"itsm_need_info": {
-			Value: &goai.Example{
-				Summary: "继续 ITSM 补信息阶段",
-				Value: g.Map{
-					"targets": g.Map{
-						"83120df4-a30d-44a4-b958-98a94689b8c7": g.Map{
-							"answer": "道扬书院C1010，WiFi能搜到但连接后无法上网，宿舍里多台设备都受影响。",
-						},
-					},
-				},
-			},
-		},
-	}
-	AgentRunResumeResExamples = goai.Examples{
-		"created": {
-			Value: &goai.Example{
-				Summary: "成功创建 resume run",
-				Value: g.Map{
-					"code":    0,
-					"message": "",
-					"data": g.Map{
-						"assistant_key": "campus",
-						"run_id":        "run-01234567",
-						"session_id":    "sess-4f8e3652-30ff-4d84-99ea-5df7b359af80",
-						"run_status":    "queued",
-					},
-				},
-			},
-		},
-	}
-	AgentRunCancelResExamples = goai.Examples{
-		"cancelled": {
-			Value: &goai.Example{
-				Summary: "成功发出取消请求",
-				Value: g.Map{
-					"code":    0,
-					"message": "",
-					"data": g.Map{
-						"assistant_key": "campus",
-						"run_id":        "run-8f4b6d3b",
-						"result": g.Map{
-							"cancelled": true,
-						},
-					},
-				},
-			},
-		},
-	}
 	AgentSessionsResExamples = goai.Examples{
 		"list": {
 			Value: &goai.Example{

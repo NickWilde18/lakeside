@@ -1,39 +1,41 @@
-# Lakeside Agent Testing Guide (Current Runtime)
+# Lakeside Agent Testing Guide
 
-本文档对应当前 `run + worker + SSE` 架构。
+本文档对应当前 **session-first + render/actions** 主产品协议。
 
-主入口：
+`render/actions` 的 NDJSON 负载直接对齐 **A2UI v0.8 catalog 语义**，但只负责 **中间聊天区**。
 
-- `POST /v1/agent/{assistant_key}/runs`
-- `GET /v1/agent/{assistant_key}/runs/{run_id}`
-- `GET /v1/agent/{assistant_key}/runs/{run_id}/events`
-- `POST /v1/agent/{assistant_key}/runs/{run_id}/resume`
-- `POST /v1/agent/{assistant_key}/runs/{run_id}/cancel`
+## 主产品入口
+
+- `GET /v1/agent/{assistant_key}/render`
+- `POST /v1/agent/{assistant_key}/actions`
+- `GET /v1/agent/{assistant_key}/sessions`
+- `POST /v1/agent/{assistant_key}/sessions`
+- `DELETE /v1/agent/{assistant_key}/sessions/{session_id}`
 
 默认约定：
 
 - `assistant_key=campus`
-- 请求头 `X-User-ID` 的值为 UPN
+- 请求头 `X-User-ID` 的值是 UPN
 - 服务地址 `http://127.0.0.1:8011`
 
 ## 1. 前置检查
 
-1. Redis 可连接（本项目必需依赖）。
+1. Redis 可连接。
 2. `config/config.yaml` 至少配置：
    - `agent.redis.*`
    - `model.*`
    - `agents.roots/domains/leaves`
-3. 可选：若要测知识检索，配置 `agents.rag.baseURL` 并确保 RAG 服务可用。
+3. 如需测知识检索，配置 `agents.rag.baseURL` 并确保 RAG 服务可用。
 
 ## 2. 启动方式
 
-方式 A：单进程（推荐联调）
+单进程：
 
 ```bash
 MODE=all go run main.go
 ```
 
-方式 B：多进程（生产形态）
+分离模式：
 
 ```bash
 # 终端1：仅 API
@@ -43,115 +45,167 @@ MODE=api go run main.go
 MODE=worker go run main.go
 ```
 
-## 3. 基础流程（create -> events -> snapshot）
+## 3. render 空页面
 
-创建 run：
-
-```bash
-curl -sS -X POST 'http://127.0.0.1:8011/v1/agent/campus/runs' \
-  -H 'Content-Type: application/json' \
-  -H 'X-User-ID: 122020255@link.cuhk.edu.cn' \
-  -d '{"message":"宿舍 WiFi 连接后无法上网，先给我排查建议，再帮我报修。"}'
-```
-
-记录返回中的 `run_id`。
-
-订阅事件：
+未选中会话时，请求：
 
 ```bash
-curl -N -sS 'http://127.0.0.1:8011/v1/agent/campus/runs/<RUN_ID>/events' \
-  -H 'X-User-ID: 122020255@link.cuhk.edu.cn'
-```
-
-查询快照：
-
-```bash
-curl -sS 'http://127.0.0.1:8011/v1/agent/campus/runs/<RUN_ID>' \
+curl -N -sS 'http://127.0.0.1:8011/v1/agent/campus/render' \
   -H 'X-User-ID: 122020255@link.cuhk.edu.cn'
 ```
 
 期望：
 
-- `run_status` 进入 `queued -> running -> waiting_input|done|failed|cancelled`
-- `waiting_input` 时有 `interrupts`
-- `done` 时有 `result`
-- SSE 终态事件与 `run_status` 对应：`run_waiting_input` / `run_completed` / `run_failed` / `run_cancelled`
+- 返回 `application/x-ndjson`
+- 至少包含：`deleteSurface`、`surfaceUpdate`、`dataModelUpdate`、`beginRendering`
+- `surfaceUpdate.components[*]` 使用标准 catalog 组件定义，例如 `Row`、`Column`、`Card`、`Text`、`Button`、`TextField`
+- 只渲染聊天区，不包含左侧历史列表或右侧轨迹列
+- 中间显示空态，不自动创建 session
 
-## 4. resume 流程
+## 4. actions 发送消息
 
-当 `run_status=waiting_input` 后，取 `interrupt_id` 调用：
+直接发送第一条消息：
 
 ```bash
-curl -sS -X POST 'http://127.0.0.1:8011/v1/agent/campus/runs/<RUN_ID>/resume' \
+curl -N -sS -X POST 'http://127.0.0.1:8011/v1/agent/campus/actions' \
   -H 'Content-Type: application/json' \
   -H 'X-User-ID: 122020255@link.cuhk.edu.cn' \
-  -d '{"targets":{"<INTERRUPT_ID>":{"confirmed":true}}}'
+  -d '{
+    "userAction": {
+      "name": "send_message",
+      "surfaceId": "agent-canvas",
+      "sourceComponentId": "composer-send",
+      "timestamp": "2026-03-21T15:00:00Z",
+      "context": {
+        "message": "VPN 连不上，顺便告诉我学生群组邮箱地址。"
+      }
+    }
+  }'
 ```
 
 期望：
 
-- 返回新的 `run_id`
-- 新 run 可继续 `events/snapshot`
+- 返回 NDJSON 流
+- 早期消息里会写入新的 `meta.sessionId`
+- 如果模型正常，会逐步返回助理回答
+- 如果顶层或模块判断信息不足，会出现 `need_info` follow-up interrupt
+- 如果没有模块高置信命中，会返回带“通用回答”标识的 fallback 内容
+- 若触发 ITSM 中断，会出现 interrupt 数据模型和对应组件
 
-## 5. cancel 流程
+## 5. sessions 列表 / 创建 / 删除
 
-取消接口：
-
-```bash
-curl -sS -X POST 'http://127.0.0.1:8011/v1/agent/campus/runs/<RUN_ID>/cancel' \
-  -H 'Content-Type: application/json' \
-  -H 'X-User-ID: 122020255@link.cuhk.edu.cn' \
-  -d '{}'
-```
-
-期望：
-
-- 返回 `data.result.cancelled=true`
-- 快照最终 `run_status=cancelled`
-- SSE 出现 `run_cancelled`
-
-说明：
-
-- `queued` 可直接取消（数据库原子更新）
-- `running` 通过 Redis cancel 广播跨实例取消
-
-## 6. SSE 断线重连
-
-记录上次收到的事件 `id`，重连时可以传 `Last-Event-ID`（或 query 参数 `last_event_id`）：
+历史会话列表：
 
 ```bash
-curl -N -sS 'http://127.0.0.1:8011/v1/agent/campus/runs/<RUN_ID>/events' \
-  -H 'X-User-ID: 122020255@link.cuhk.edu.cn' \
-  -H 'Last-Event-ID: 12'
-```
-
-期望：服务会先补发 `id>12` 的历史事件，再继续实时推送。
-
-也可用 query 方式（便于某些网关或调试工具）：
-
-```bash
-curl -N -sS 'http://127.0.0.1:8011/v1/agent/campus/runs/<RUN_ID>/events?last_event_id=12' \
+curl -sS 'http://127.0.0.1:8011/v1/agent/campus/sessions?limit=30' \
   -H 'X-User-ID: 122020255@link.cuhk.edu.cn'
 ```
 
-## 7. Redis Streams 可靠性检查
-
-查看队列与 pending：
+显式创建空会话：
 
 ```bash
-redis-cli XINFO GROUPS lakeside:interactive:runtime:agent:runs:v1
-redis-cli XPENDING lakeside:interactive:runtime:agent:runs:v1 lakeside-agent-workers
+curl -sS -X POST 'http://127.0.0.1:8011/v1/agent/campus/sessions' \
+  -H 'X-User-ID: 122020255@link.cuhk.edu.cn'
+```
+
+删除历史会话：
+
+```bash
+curl -sS -X DELETE 'http://127.0.0.1:8011/v1/agent/campus/sessions/<SESSION_ID>' \
+  -H 'X-User-ID: 122020255@link.cuhk.edu.cn'
 ```
 
 期望：
 
-- 正常运行时，`pending` 会被 worker 持续清理
-- worker 重启后，pending 会被 `XAUTOCLAIM` 回收再处理
+- queued / running 的会话不能删除
+- waiting_input 会话允许删除，但删除后应无法继续 resume，且该 run 会被标记为 cancelled
+- 空会话或已完成会话可删除
+- 超过保留期的 deleted 会话应被后台 cleanup worker 物理删除，关联 messages / runs / run_events 也应被清理
 
-语义说明：
+## 6. follow_up / approval / cancel
 
-- 仅 handler 成功才 `XACK`
-- handler 失败不 `XACK`，消息保留 pending，后续可 reclaim
+当页面进入 interrupt 状态后，可继续通过 `actions` 提交。
+
+补信息：
+
+```bash
+curl -N -sS -X POST 'http://127.0.0.1:8011/v1/agent/campus/actions' \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-ID: 122020255@link.cuhk.edu.cn' \
+  -d '{
+    "userAction": {
+      "name": "follow_up_submit",
+      "surfaceId": "agent-canvas",
+      "sourceComponentId": "interrupt-submit",
+      "timestamp": "2026-03-21T15:10:00Z",
+      "context": {
+        "sessionId": "<SESSION_ID>",
+        "runId": "<RUN_ID>",
+        "interruptId": "<INTERRUPT_ID>",
+        "answer": "道扬书院 C1010，WiFi 能连上但无法访问外网。"
+      }
+    }
+  }'
+```
+
+确认提交：
+
+```bash
+curl -N -sS -X POST 'http://127.0.0.1:8011/v1/agent/campus/actions' \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-ID: 122020255@link.cuhk.edu.cn' \
+  -d '{
+    "userAction": {
+      "name": "approval_submit",
+      "surfaceId": "agent-canvas",
+      "sourceComponentId": "interrupt-approve",
+      "timestamp": "2026-03-21T15:11:00Z",
+      "context": {
+        "sessionId": "<SESSION_ID>",
+        "runId": "<RUN_ID>",
+        "interruptId": "<INTERRUPT_ID>",
+        "approved": true,
+        "subject": "宿舍 WiFi 无法上网",
+        "othersDesc": "多台设备都无法访问外网。"
+      }
+    }
+  }'
+```
+
+取消当前执行：
+
+```bash
+curl -N -sS -X POST 'http://127.0.0.1:8011/v1/agent/campus/actions' \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-ID: 122020255@link.cuhk.edu.cn' \
+  -d '{
+    "userAction": {
+      "name": "cancel_turn",
+      "surfaceId": "agent-canvas",
+      "sourceComponentId": "cancel-run-btn",
+      "timestamp": "2026-03-21T15:12:00Z",
+      "context": {
+        "sessionId": "<SESSION_ID>",
+        "runId": "<RUN_ID>"
+      }
+    }
+  }'
+```
+
+## 7. 高级轨迹
+
+默认不展示高级轨迹。前端开启高级模式后，应改为单独拉：
+
+```bash
+curl -sS 'http://127.0.0.1:8011/v1/agent/campus/sessions/<SESSION_ID>' \
+  -H 'X-User-ID: 122020255@link.cuhk.edu.cn'
+```
+
+期望：
+
+- 返回该会话的 `messages` 与 `runs`
+- `runs[*].events` 可用于渲染右侧时间线
+- `render/actions` 本身不再负责整页轨迹列
 
 ## 8. 自动化测试
 
@@ -159,7 +213,7 @@ redis-cli XPENDING lakeside:interactive:runtime:agent:runs:v1 lakeside-agent-wor
 go test ./...
 ```
 
-如需 live integration（依赖本地已启动服务与可用外部依赖）：
+如需 live integration：
 
 ```bash
 LAKESIDE_RUN_LIVE_TESTS=1 \

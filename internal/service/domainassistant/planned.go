@@ -7,9 +7,12 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/schema"
 	"github.com/gogf/gf/v2/frame/g"
 
 	"lakeside/internal/service/agentplatform/eventctx"
+	legacyitsm "lakeside/internal/service/itsmagent"
+	"lakeside/internal/service/moduleapi"
 )
 
 const (
@@ -27,35 +30,21 @@ type domainPlanStep struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
+type moduleClarifyState struct {
+	OriginalMessage string `json:"original_message"`
+	Prompt          string `json:"prompt"`
+}
+
 type plannedAgent struct {
 	key         string
 	description string
 	instruction string
 	leaves      map[string]LeafBinding
 	planner     *planner
-	fallback    adk.ResumableAgent
 }
 
-func newPlannedAgent(ctx context.Context, key, description, instruction string, leaves []LeafBinding, fallback adk.ResumableAgent) (adk.ResumableAgent, error) {
-	items := make(map[string]LeafBinding, len(leaves))
-	for _, leaf := range leaves {
-		leaf.Key = strings.TrimSpace(leaf.Key)
-		if leaf.Key == "" || leaf.Agent == nil {
-			continue
-		}
-		items[leaf.Key] = leaf
-	}
-	if len(items) == 0 {
-		return fallback, nil
-	}
-	return &plannedAgent{
-		key:         strings.TrimSpace(key),
-		description: strings.TrimSpace(description),
-		instruction: strings.TrimSpace(instruction),
-		leaves:      items,
-		planner:     newPlanner(ctx, key, instruction, leaves),
-		fallback:    fallback,
-	}, nil
+func init() {
+	schema.RegisterName[*moduleClarifyState]("lakeside_domain_clarify_state")
 }
 
 func (a *plannedAgent) Name(_ context.Context) string {
@@ -70,47 +59,42 @@ func (a *plannedAgent) GetType() string {
 	return "DomainWorkflow"
 }
 
+func (a *plannedAgent) Assess(ctx context.Context, userMessage string) (moduleapi.Assessment, error) {
+	if a == nil || a.planner == nil {
+		return moduleapi.Assessment{}, fmt.Errorf("domain planner not initialized")
+	}
+	return a.planner.Assess(ctx, userMessage)
+}
+
 func (a *plannedAgent) Run(ctx context.Context, input *adk.AgentInput, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
-	eventctx.EmitForNode(ctx, "domain_plan_started", a.key, "正在生成领域执行计划", g.Map{
-		"domain": a.key,
-	})
+	eventctx.EmitForNode(ctx, "domain_plan_started", a.key, "正在生成领域执行计划", g.Map{"domain": a.key})
 	plan, err := a.planForInput(ctx, input)
 	if err != nil {
-		g.Log().Warningf(ctx, "domainassistant planner fallback to supervisor, domain=%s err=%v", a.key, err)
-		plan = domainExecutionPlan{Mode: planModeSupervisor}
-		eventctx.EmitForNode(ctx, "domain_supervisor_fallback", a.key, "规划不稳定，改用动态调度继续处理", g.Map{
-			"domain": a.key,
-			"reason": err.Error(),
-		})
-	} else {
-		g.Log().Infof(ctx, "domainassistant plan ready, domain=%s mode=%s steps=%s", a.key, strings.TrimSpace(plan.Mode), planSummary(plan))
-		eventctx.EmitForNode(ctx, "domain_plan_ready", a.key, "领域执行计划已生成", g.Map{
-			"domain":       a.key,
-			"mode":         strings.TrimSpace(plan.Mode),
-			"steps":        planStepKeys(plan),
-			"step_details": planStepDetails(plan),
-		})
+		g.Log().Warningf(ctx, "domainassistant planning requires clarification or failed, domain=%s err=%v", a.key, err)
+		return a.runClarifyOrError(ctx, input, err)
 	}
+	g.Log().Infof(ctx, "domainassistant plan ready, domain=%s mode=%s steps=%s", a.key, strings.TrimSpace(plan.Mode), planSummary(plan))
+	eventctx.EmitForNode(ctx, "domain_plan_ready", a.key, "领域执行计划已生成", g.Map{
+		"domain":       a.key,
+		"mode":         strings.TrimSpace(plan.Mode),
+		"steps":        planStepKeys(plan),
+		"step_details": planStepDetails(plan),
+	})
 	a.storePlan(ctx, plan)
-	return a.runWithPlan(ctx, input, nil, plan, opts...)
+	return a.runWithPlan(ctx, nil, plan, opts...)
 }
 
 func (a *plannedAgent) Resume(ctx context.Context, info *adk.ResumeInfo, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	if state, ok := info.InterruptState.(*moduleClarifyState); ok && state != nil {
+		return a.resumeClarify(ctx, info, state, opts...)
+	}
 	eventctx.EmitForNode(ctx, "domain_plan_started", a.key, "正在加载领域执行计划", g.Map{
 		"domain": a.key,
 		"resume": true,
 	})
 	plan, err := a.loadPlan(ctx)
 	if err != nil {
-		g.Log().Warningf(ctx, "domainassistant resume missing plan, fallback to supervisor, domain=%s err=%v", a.key, err)
-		eventctx.EmitForNode(ctx, "domain_supervisor_fallback", a.key, "未找到既有计划，改用动态调度继续处理", g.Map{
-			"domain": a.key,
-			"reason": err.Error(),
-		})
-		if a.fallback == nil {
-			return singleErrorIter(fmt.Errorf("domain execution plan not found"))
-		}
-		return a.fallback.Resume(ctx, info, opts...)
+		return singleErrorIter(fmt.Errorf("domain execution plan not found: %w", err))
 	}
 	g.Log().Infof(ctx, "domainassistant resume plan loaded, domain=%s mode=%s steps=%s", a.key, strings.TrimSpace(plan.Mode), planSummary(plan))
 	eventctx.EmitForNode(ctx, "domain_plan_ready", a.key, "已加载领域执行计划", g.Map{
@@ -120,7 +104,11 @@ func (a *plannedAgent) Resume(ctx context.Context, info *adk.ResumeInfo, opts ..
 		"step_details": planStepDetails(plan),
 		"resume":       true,
 	})
-	return a.runWithPlan(ctx, nil, info, plan, opts...)
+	seq, err := a.buildSequentialAgent(ctx, plan)
+	if err != nil {
+		return singleErrorIter(err)
+	}
+	return seq.Resume(ctx, info, opts...)
 }
 
 func (a *plannedAgent) planForInput(ctx context.Context, input *adk.AgentInput) (domainExecutionPlan, error) {
@@ -138,63 +126,77 @@ func (a *plannedAgent) planForInput(ctx context.Context, input *adk.AgentInput) 
 	if strings.TrimSpace(plan.Mode) == "" {
 		plan.Mode = planModeSequential
 	}
+	if strings.EqualFold(strings.TrimSpace(plan.Mode), planModeSupervisor) || len(plan.Steps) == 0 {
+		return domainExecutionPlan{}, fmt.Errorf("planner cannot derive executable plan")
+	}
 	return plan, nil
 }
 
-func (a *plannedAgent) runWithPlan(ctx context.Context, input *adk.AgentInput, info *adk.ResumeInfo, plan domainExecutionPlan, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+func (a *plannedAgent) runClarifyOrError(ctx context.Context, input *adk.AgentInput, planErr error) *adk.AsyncIterator[*adk.AgentEvent] {
+	message := latestUserMessage(ctx, input)
+	assessment, err := a.Assess(ctx, message)
+	if err == nil && assessment.Status == moduleapi.AssessmentNeedClarify && strings.TrimSpace(assessment.FollowUpPrompt) != "" {
+		interrupt := &legacyitsm.TicketInterruptInfo{
+			Type:   "need_info",
+			Prompt: strings.TrimSpace(assessment.FollowUpPrompt),
+		}
+		eventctx.EmitForNode(ctx, "domain_clarify_needed", a.key, interrupt.Prompt, g.Map{
+			"domain": a.key,
+			"reason": assessment.Reason,
+		})
+		return singleEventIter(adk.StatefulInterrupt(ctx, interrupt, &moduleClarifyState{
+			OriginalMessage: message,
+			Prompt:          interrupt.Prompt,
+		}))
+	}
+	if err != nil {
+		return singleErrorIter(fmt.Errorf("domain assessment failed: %w", err))
+	}
+	return singleErrorIter(planErr)
+}
+
+func (a *plannedAgent) resumeClarify(ctx context.Context, info *adk.ResumeInfo, state *moduleClarifyState, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	if info == nil || !info.WasInterrupted {
+		return singleErrorIter(fmt.Errorf("invalid clarify resume context"))
+	}
+	if !info.IsResumeTarget {
+		interrupt := &legacyitsm.TicketInterruptInfo{Type: "need_info", Prompt: state.Prompt}
+		return singleEventIter(adk.StatefulInterrupt(ctx, interrupt, state))
+	}
+	resume, ok := info.ResumeData.(*legacyitsm.ResumeCollectData)
+	if !ok || strings.TrimSpace(resume.Answer) == "" {
+		interrupt := &legacyitsm.TicketInterruptInfo{Type: "need_info", Prompt: state.Prompt}
+		return singleEventIter(adk.StatefulInterrupt(ctx, interrupt, state))
+	}
+	clarified := combineClarifiedMessage(state.OriginalMessage, resume.Answer)
+	adk.AddSessionValue(ctx, "latest_user_message", clarified)
+	plan, err := a.planForInput(ctx, &adk.AgentInput{Messages: []*schema.Message{schema.UserMessage(clarified)}})
+	if err != nil {
+		return a.runClarifyOrError(ctx, &adk.AgentInput{Messages: []*schema.Message{schema.UserMessage(clarified)}}, err)
+	}
+	a.storePlan(ctx, plan)
+	return a.runWithPlan(ctx, nil, plan, opts...)
+}
+
+func (a *plannedAgent) runWithPlan(ctx context.Context, input *adk.AgentInput, plan domainExecutionPlan, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	mode := strings.ToLower(strings.TrimSpace(plan.Mode))
-	emitMode := mode
-	if emitMode == "" {
-		emitMode = planModeSequential
+	if mode == "" {
+		mode = planModeSequential
 	}
 	eventctx.EmitForNode(ctx, "domain_execute_started", a.key, "开始执行领域计划", g.Map{
 		"domain":       a.key,
-		"mode":         emitMode,
+		"mode":         mode,
 		"steps":        planStepKeys(plan),
 		"step_details": planStepDetails(plan),
 	})
-	switch mode {
-	case "", planModeSequential:
-		g.Log().Infof(ctx, "domainassistant execute sequential, domain=%s steps=%s", a.key, planSummary(plan))
-		seq, err := a.buildSequentialAgent(ctx, plan)
-		if err != nil {
-			g.Log().Warningf(ctx, "domainassistant build sequential failed, fallback to supervisor, domain=%s err=%v", a.key, err)
-			eventctx.EmitForNode(ctx, "domain_supervisor_fallback", a.key, "执行计划不可用，改用动态调度继续处理", g.Map{
-				"domain": a.key,
-				"reason": err.Error(),
-			})
-			return a.runFallback(ctx, input, info, opts...)
-		}
-		if info != nil {
-			return seq.Resume(ctx, info, opts...)
-		}
-		return seq.Run(ctx, input, opts...)
-	case planModeSupervisor:
-		g.Log().Infof(ctx, "domainassistant execute supervisor fallback, domain=%s", a.key)
-		eventctx.EmitForNode(ctx, "domain_supervisor_fallback", a.key, "按计划切换到动态调度执行", g.Map{
-			"domain": a.key,
-			"reason": "plan_mode_supervisor",
-		})
-		return a.runFallback(ctx, input, info, opts...)
-	default:
-		g.Log().Warningf(ctx, "domainassistant unknown plan mode, fallback to supervisor, domain=%s mode=%s", a.key, mode)
-		eventctx.EmitForNode(ctx, "domain_supervisor_fallback", a.key, "计划模式不可识别，改用动态调度继续处理", g.Map{
-			"domain": a.key,
-			"mode":   mode,
-			"reason": "unknown_plan_mode",
-		})
-		return a.runFallback(ctx, input, info, opts...)
+	if mode != planModeSequential {
+		return singleErrorIter(fmt.Errorf("unsupported domain execution mode: %s", mode))
 	}
-}
-
-func (a *plannedAgent) runFallback(ctx context.Context, input *adk.AgentInput, info *adk.ResumeInfo, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
-	if a == nil || a.fallback == nil {
-		return singleErrorIter(fmt.Errorf("domain fallback supervisor is nil"))
+	seq, err := a.buildSequentialAgent(ctx, plan)
+	if err != nil {
+		return singleErrorIter(err)
 	}
-	if info != nil {
-		return a.fallback.Resume(ctx, info, opts...)
-	}
-	return a.fallback.Run(ctx, input, opts...)
+	return seq.Run(ctx, input, opts...)
 }
 
 func (a *plannedAgent) buildSequentialAgent(ctx context.Context, plan domainExecutionPlan) (adk.ResumableAgent, error) {
@@ -293,10 +295,7 @@ func planStepDetails(plan domainExecutionPlan) []g.Map {
 		if key == "" {
 			continue
 		}
-		items = append(items, g.Map{
-			"agent_key": key,
-			"reason":    reason,
-		})
+		items = append(items, g.Map{"agent_key": key, "reason": reason})
 	}
 	return items
 }
@@ -312,7 +311,7 @@ func latestUserMessage(ctx context.Context, input *adk.AgentInput) string {
 	}
 	for i := len(input.Messages) - 1; i >= 0; i-- {
 		msg := input.Messages[i]
-		if msg == nil || msg.Role != "user" {
+		if msg == nil || msg.Role != schema.User {
 			continue
 		}
 		if strings.TrimSpace(msg.Content) != "" {
@@ -322,10 +321,31 @@ func latestUserMessage(ctx context.Context, input *adk.AgentInput) string {
 	return ""
 }
 
+func combineClarifiedMessage(originalMessage, answer string) string {
+	originalMessage = strings.TrimSpace(originalMessage)
+	answer = strings.TrimSpace(answer)
+	if originalMessage == "" {
+		return answer
+	}
+	if answer == "" {
+		return originalMessage
+	}
+	return originalMessage + "\n\n补充信息：" + answer
+}
+
 func singleErrorIter(err error) *adk.AsyncIterator[*adk.AgentEvent] {
 	iter, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 	go func() {
 		gen.Send(&adk.AgentEvent{Err: err})
+		gen.Close()
+	}()
+	return iter
+}
+
+func singleEventIter(event *adk.AgentEvent) *adk.AsyncIterator[*adk.AgentEvent] {
+	iter, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	go func() {
+		gen.Send(event)
 		gen.Close()
 	}()
 	return iter

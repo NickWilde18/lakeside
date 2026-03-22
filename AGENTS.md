@@ -34,12 +34,17 @@
 - 顶层 IT 助手下的各类子代理（例如 `itsm`、knowledge subagents）是同级关系；不要把知识检索能力嵌套进 ITSM 子代理内部。
 - 对外请求头 `X-User-ID` 保持不变，但其值语义统一为 UPN；如某个下游系统要求员工编号等其他身份字段，应在服务端内部转换，不要要求前端改传别的 header。
 - 顶层/领域助手的路由提示词模板应通过 `agents.roots[].instructionTemplate`、`agents.domains[].instructionTemplate` 配置，不要把这类路由策略硬编码在 Go 代码里；字段说明写在 `config/config.example.yaml`。
-- 顶层/领域层编排优先使用 Eino 官方组件，当前统一使用 `adk/prebuilt/supervisor`；只有官方没有现成能力时才加薄适配层。
-- knowledge 叶子 agent 不得靠硬编码“一轮只检索一次”来限制检索；如需扩召回，优先使用 Eino 官方检索组件，例如 `flow/retriever/multiquery`。
+- `campus` 顶层助手必须保持薄：只负责模块注册、assessment、fan-out 与结果合并，不得持有具体领域知识，也不得硬编码直连某个领域模块。
+- 领域模块（例如 `it`）统一走 `assessment + planner + workflow`；不要再加 supervisor fallback。信息不足时优先触发 follow-up interrupt，而不是退回 supervisor。
+- 顶层/领域层编排优先使用 Eino 官方 workflow/parallel/sequential 等组件；只有官方没有现成能力时才加薄适配层。
+- knowledge 能力优先实现为 Eino `tool`，仅在需要兼容当前 workflow 编排时包一层薄 agent adapter；不得靠硬编码“一轮只检索一次”来限制检索；如需扩召回，优先使用 Eino 官方检索组件，例如 `flow/retriever/multiquery`。
 - 未来 agent 体系按分层组织：`顶层助手 -> 领域助手 -> 叶子 agent`。目录设计应优先体现这三层结构，不再继续把所有 agent 平铺在 `internal/service` 根下。
 - 主产品入口统一使用 `/v1/agent/{assistant_key}/*`；旧 `/v1/assistant/*` 不再保留。
-- 变更 SSE `event_type` 或 payload 字段时，必须同步更新 `README.MD`、`TESTING.md` 与前端事件解析逻辑，三者缺一不可。
-- 在同一会话中继续提问时，`POST /v1/agent/{assistant_key}/runs` 必须传 `session_id` 复用会话；仅在显式新建对话时省略 `session_id`。
+- agent 主产品聊天协议统一使用 `GET /v1/agent/{assistant_key}/render` + `POST /v1/agent/{assistant_key}/actions`；内部 `run/run_events` 仅作为调试与高级轨迹模型，不再额外暴露公开 `/runs*` HTTP 接口。
+- `render/actions` 的 NDJSON 消息只负责 **聊天区 chat surface**，不要让后端/A2UI 接管整页；左侧历史会话、页面壳子与右侧高级轨迹仍由前端平台自己渲染。
+- `render/actions` 的 NDJSON 消息对齐 A2UI v0.8 catalog 语义；如前端需要保持平台既有视觉，可自定义聊天区 renderer，但不得把页面壳子重新塞回 A2UI surface。
+- 会话恢复以 `session + messages` 为事实来源；长期记忆只作为增强注入，不得替代会话消息历史。
+- 变更 `render/actions` 的 NDJSON 消息结构、`userAction` 动作名/上下文字段，或高级轨迹映射字段时，必须同步更新 `README.MD`、`TESTING.md` 与前端 renderer/解析逻辑，三者缺一不可。
 - 前端运行态判断统一约定：`queued`、`running` 才显示处理中；`waiting_input`、`done`、`failed`、`cancelled` 均为非运行态，不显示 spinner。
 
 ## Testing Guidelines

@@ -104,7 +104,11 @@ func (s *Service) consumeIterator(ctx context.Context, assistantKey string, iter
 			}
 		}
 		if event.Action != nil && event.Action.Interrupted != nil {
-			interruptPath := s.resolveNodePath(assistantKey, preferLongerPath(path, lastPath), "itsm", strings.TrimSpace(event.AgentName))
+			interruptNode := strings.TrimSpace(event.AgentName)
+			if interruptNode == "" && len(path) > 0 {
+				interruptNode = path[len(path)-1]
+			}
+			interruptPath := s.resolveNodePath(assistantKey, preferLongerPath(path, lastPath), interruptNode)
 			interrupts, status := legacyitsm.APIInterruptsFromContexts(event.Action.Interrupted.InterruptContexts)
 			step := StepResult{
 				Path:       interruptPath,
@@ -127,10 +131,10 @@ func (s *Service) consumeIterator(ctx context.Context, assistantKey string, iter
 				"assistant":  assistantKey,
 				"session_id": sessionID,
 			})
-			if resp.Result == nil && (rootFinalMessage != "" || len(aggregatedSources) > 0) {
+			if resp.Result == nil && (rootFinalMessage != "" || len(aggregatedSources) > 0 || strings.TrimSpace(mergedVisibleStepMessage(resp.Steps)) != "") {
 				resp.Result = &Result{
 					Success: false,
-					Message: chooseMessage(firstStepMessage(resp.Steps), chooseMessage(rootFinalMessage, lastMessage)),
+					Message: chooseMessage(rootFinalMessage, chooseMessage(mergedVisibleStepMessage(resp.Steps), lastMessage)),
 					Sources: aggregatedSources,
 				}
 			}
@@ -144,9 +148,9 @@ func (s *Service) consumeIterator(ctx context.Context, assistantKey string, iter
 		resp.ActivePath = pathOrDefault(lastPath, assistantKey)
 	}
 	if resp.Result == nil {
-		finalMessage := chooseMessage(rootFinalMessage, chooseMessage(firstStepMessage(resp.Steps), chooseMessage(lastMessage, localizeText(language, "操作完成。", "Done."))))
+		finalMessage := chooseMessage(rootFinalMessage, chooseMessage(mergedVisibleStepMessage(resp.Steps), chooseMessage(lastMessage, localizeText(language, "操作完成。", "Done."))))
 		if len(aggregatedSources) == 0 {
-			finalMessage = chooseMessage(firstStepMessage(resp.Steps), finalMessage)
+			finalMessage = chooseMessage(mergedVisibleStepMessage(resp.Steps), finalMessage)
 		}
 		resp.Result = &Result{
 			Success: true,
@@ -157,8 +161,11 @@ func (s *Service) consumeIterator(ctx context.Context, assistantKey string, iter
 		resp.Result.Sources = mergeSources(resp.Result.Sources, aggregatedSources)
 		if strings.TrimSpace(rootFinalMessage) != "" {
 			resp.Result.Message = rootFinalMessage
-		} else if strings.TrimSpace(resp.Result.Message) == "" {
-			resp.Result.Message = chooseMessage(lastMessage, localizeText(language, "操作完成。", "Done."))
+		} else {
+			resp.Result.Message = chooseMessage(mergedVisibleStepMessage(resp.Steps), resp.Result.Message)
+			if strings.TrimSpace(resp.Result.Message) == "" {
+				resp.Result.Message = chooseMessage(lastMessage, localizeText(language, "操作完成。", "Done."))
+			}
 		}
 	}
 	s.invalidateCheckpoint(ctx, assistantKey, checkpointID)
@@ -399,6 +406,9 @@ func responseToVisibleMessage(resp *Response) (string, string) {
 		return "", "{}"
 	}
 	if len(resp.Interrupts) > 0 {
+		if resp.Result != nil && strings.TrimSpace(resp.Result.Message) != "" {
+			return resp.Result.Message, toJSONString(resp)
+		}
 		return resp.Interrupts[0].Prompt, toJSONString(resp)
 	}
 	if resp.Result != nil {
@@ -544,6 +554,26 @@ func firstStepMessage(steps []StepResult) string {
 		}
 	}
 	return ""
+}
+
+func mergedVisibleStepMessage(steps []StepResult) string {
+	parts := make([]string, 0, len(steps))
+	seen := make(map[string]struct{}, len(steps))
+	for _, step := range steps {
+		if len(step.Interrupts) > 0 {
+			continue
+		}
+		message := strings.TrimSpace(step.Message)
+		if message == "" {
+			continue
+		}
+		if _, ok := seen[message]; ok {
+			continue
+		}
+		seen[message] = struct{}{}
+		parts = append(parts, message)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func formatError(err error) string {

@@ -120,6 +120,7 @@ func (s *Service) StartWorkers(ctx context.Context) error {
 				_ = s.redisRuntime.consumeRuns(context.Background(), name, 16, s.processQueuedRun)
 			}(consumerName)
 		}
+		s.startDeletedSessionCleanupWorker()
 	})
 	return s.workerErr
 }

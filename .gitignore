@@ -18,3 +18,7 @@ temp.yaml
 bin
 **/config/config.yaml
 runtime/
+*.log
+.codex
+*.yml
+.playwright

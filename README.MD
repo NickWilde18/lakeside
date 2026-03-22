@@ -1,189 +1,143 @@
 # Lakeside
 
-Lakeside 现在是一个多层 Agent 平台，而不是单一的 IT 助手服务。
+Lakeside 当前是一个分层 Agent 平台。
 
-当前已落地的树形结构：
+已落地结构：
 
 - 顶层助手：`campus`
 - 领域助手：`it`
 - 叶子 agent：`itsm`、`campus_it_kb`、`campus_it_kb_for_itso_student_assistant`
 
-主入口统一为：
+前端主产品协议已经切到 **session-first + server-driven UI**。
 
-- `POST /v1/agent/{assistant_key}/runs`
-- `GET /v1/agent/{assistant_key}/runs/{run_id}`
-- `GET /v1/agent/{assistant_key}/runs/{run_id}/events`
-- `POST /v1/agent/{assistant_key}/runs/{run_id}/resume`
-- `POST /v1/agent/{assistant_key}/runs/{run_id}/cancel`
+当前 `render/actions` 的 NDJSON 消息对齐 **A2UI v0.8 catalog 语义**，但 A2UI 只负责 **中间对话区 chat surface**。页面壳子、左侧历史会话和右侧高级轨迹仍由前端平台自己渲染。
+
+## 主产品入口
+
+主产品页面统一使用：
+
+- `GET /v1/agent/{assistant_key}/render`
+- `POST /v1/agent/{assistant_key}/actions`
+- `GET /v1/agent/{assistant_key}/sessions`
+- `POST /v1/agent/{assistant_key}/sessions`
+- `DELETE /v1/agent/{assistant_key}/sessions/{session_id}`
 - `GET /v1/agent/{assistant_key}/memories`
 - `POST /v1/agent/{assistant_key}/memories/clear`
 
-当前仍保留 `/v1/itsm/agent/*` 作为叶子 agent 调试入口，不再作为主产品入口。
+当前仍保留：
+- 内部 `run + run_events` 调试模型，用于高级轨迹和问题排查
 
-`POST /v1/agent/{assistant_key}/runs` 请求体当前约定：
+## 页面协议
 
-- `message`：必填，用户本轮输入
-- `session_id`：可选；传入表示复用现有会话，不传表示新建会话
+`render/actions` 返回 `application/x-ndjson`。
+
+消息结构对齐 A2UI v0.8：
+
+当前使用的消息类型：
+
+- `deleteSurface`
+- `surfaceUpdate`
+- `dataModelUpdate`
+- `beginRendering`
+
+后端负责输出聊天区所需的 catalog 组件树和数据模型；前端 agent 模块负责：
+
+- 渲染页面壳子
+- 通过 `GET /sessions` 管理左侧历史会话
+- 通过 `GET /sessions/{session_id}` 管理右侧高级轨迹
+- 在中间聊天区消费 `render/actions` 并回传用户动作
+
+当前动作名包括：
+
+- `send_message`
+- `follow_up_submit`
+- `approval_submit`
+- `cancel_turn`
+
+## 会话模型
+
+主产品以 `session + messages` 为事实来源。
+
+语义约定：
+
+- `session`：一次对话
+- `messages`：该会话下的历史消息
+- `memories`：长期事实记忆，只作为增强注入，不替代消息历史
+
+当前前端恢复历史页面时：
+
+1. 先通过 `GET /sessions` 获取左侧历史列表
+2. 中间聊天区通过 `GET /render` 获取 chat surface 快照
+3. 选中会话后，`render?session_id=...` 恢复历史消息和待处理 interrupt
+4. 用户动作统一通过 `POST /actions` 回传
+5. 如开启高级轨迹，前端再通过 `GET /sessions/{session_id}` 拉取 run 详情
+
+历史会话删除语义：
+
+- `queued` / `running`：不允许删除
+- `waiting_input`：允许删除，但会同时放弃 pending interrupt、清空 checkpoint 并把最近一次 run 记为 `cancelled`
+- `done` / `failed` / `cancelled`：允许删除
+- 用户侧删除先做软删除；后台 cleanup worker 会定期物理清理超过保留期的 `deleted` 会话及其 `messages / runs / run_events`
+
+空白会话可以通过 `POST /sessions` 显式创建，但当前产品也允许用户直接发送第一条消息，让服务端在创建首个 turn 时自动建会话。
 
 ## 架构分层
 
 - `internal/service/agentplatform/`
   - 通用平台层：registry、runtime、checkpoint、session、memory、response
 - `internal/service/rootassistant/`
-  - 顶层助手，例如 `campus`；当前统一使用 Eino 官方 `adk/prebuilt/supervisor`
+  - 顶层助手，例如 `campus`
 - `internal/service/domainassistant/`
-  - 领域助手，例如 `it`；当前统一使用 Eino 官方 `adk/prebuilt/supervisor`
+  - 领域助手，例如 `it`
 - `internal/service/leafagent/`
   - 叶子 agent，目前包括 `itsm` 与 `knowledge`
 - `internal/infra/`
   - 外部依赖适配层，例如 `ragclient`、`uniauth`、`rediskit`
 
+当前顶层/领域层编排继续优先使用 Eino 官方组件；叶子层保留各自实现。
+
+当前运行时语义：
+
+- `campus` 是薄根节点，只做模块 assessment、fan-out 和结果合并
+- `it` 是第一个领域模块，内部执行 `assessment + planner + workflow`
+- `knowledge` 作为 read tool 使用
+- `itsm` 作为 write / interruptible agent 使用
+- 无模块命中时，`campus` 返回明确标注的通用 fallback 回答
+- 模块或顶层判断信息不足时，会直接发起 follow-up interrupt
+
 ## 当前行为
 
-一次 run 允许出现多个 step。例如：
+一次用户动作可能触发一个新的后台 run，但这个 run 已经不是主产品页面直接消费的对象。
+
+当前主页面看到的是：
+
+- 左侧前端历史列表
+- 中间聊天区历史消息与流式回复
+- 中间聊天区 interrupt 卡片
+- 可选的右侧高级轨迹
+
+对 `campus` 来说，一次执行通常仍可能包含多个后端步骤，例如：
 
 1. 先调用 knowledge 叶子 agent 返回排查建议
 2. 再调用 `itsm` 进入 `need_info` 或 `need_confirm`
 
-因此顶层响应不再只表达“命中了哪个 agent”，而是表达：
+当未来接入多个领域模块时，`campus` 会先做模块 assessment，再按 `read` 并行、`write` 串行的方式执行。
 
-- `assistant_key`
-- `active_path`
-- `steps[]`
-- `interrupts[]`
-- `result`
-- `run_status`
+只是这些步骤默认不再直接暴露成前端的主渲染协议。
 
-其中：
+## 运行态约定
 
-- `steps[]` 用于展示本轮依次发生了什么
-- `result.sources[]` 用于返回知识来源，包含 `filename`、`doc_id`、`node_id`、`snippet`、`score`
-- `interrupts[]` 当前主要来自 `itsm` 叶子 agent
-- `run_status` 用于表达运行态，例如 `queued`、`running`、`waiting_input`、`done`、`failed`、`cancelled`
+前端显示处理中时只认：
 
-运行态约定：
+- `queued`
+- `running`
 
-- 仅 `queued`、`running` 视为处理中
-- `waiting_input`、`done`、`failed`、`cancelled` 均视为非运行态
+以下状态均视为非运行态：
 
-## 会话续聊与上下文
-
-同一对话里继续提问，前端应复用已有 `session_id` 调用 `POST /runs`，后端会在同一个会话下创建新 run。
-
-当前上下文注入由两部分组成：
-
-- 长期记忆：`agent_memories`
-- 近程会话上下文：同会话最近若干条消息（当前默认最近 12 条并按长度截断）
-
-只有在用户显式开启新对话时，才不传 `session_id` 新建会话。
-
-## 配置
-
-运行时读取：
-
-- `config/config.yaml`
-
-注释示例：
-
-- `config/config.example.yaml`
-
-当前配置已经切到树形：
-
-- `agents.roots[]`
-- `agents.domains[]`
-- `agents.leaves[]`
-
-根/领域助手的路由提示词模板也都在配置里：
-
-- `agents.roots[].instructionTemplate`
-- `agents.domains[].instructionTemplate`
-
-运行时会把这些占位符替换成当前会话值：
-
-- `{assistant_key}`
-- `{user_upn}`
-- `{assistant_context}`
-- `{latest_user_message}`
-- `{child_catalog}`
-
-## 持久化
-
-SQLite：
-
-- `agent_sessions`
-- `agent_messages`
-- `agent_memories`
-- `agent_runs`
-- `agent_run_events`
-
-Redis：
-
-- 顶层助手 checkpoint：`lakeside:interactive:rootassistant:checkpoint:v1:`
-- ITSM checkpoint：`lakeside:interactive:it:subagent:itsm:checkpoint:v1:`
-- ITSM 幂等：`lakeside:interactive:it:subagent:itsm:idempotency:v1:`
-- 共享 embedding cache：`lakeside:shared:embedding:cache:v1:`
-- run 队列（Streams）：`agents.runtime.streamKey`（默认 `lakeside:interactive:runtime:agent:runs:v1`）
-- run 事件唤醒（Pub/Sub）：`agents.runtime.pubsubChannel`
-- run 取消广播（Pub/Sub）：`agents.runtime.pubsubChannel + ":cancel"`
-
-Redis 在本仓库中是必需依赖。
-
-## SSE 运行时
-
-顶层入口已经切到 `run + snapshot + SSE events`：
-
-1. `POST /v1/agent/{assistant_key}/runs`
-   - 立即返回 `run_id`、`session_id`
-   - 请求体支持可选 `session_id`：续聊复用会话，不传则新建会话
-   - run 会进入 Redis Streams 队列，由 worker 异步消费
-2. `GET /v1/agent/{assistant_key}/runs/{run_id}/events`
-   - 返回 `text/event-stream`
-   - 支持 `Last-Event-ID`
-   - 先回放 DB 事件，再结合本机订阅 + Redis Pub/Sub 推送后续事件
-3. `GET /v1/agent/{assistant_key}/runs/{run_id}`
-   - 返回当前快照
-4. `POST /v1/agent/{assistant_key}/runs/{run_id}/resume`
-   - 继续 `waiting_input` 的运行
-5. `POST /v1/agent/{assistant_key}/runs/{run_id}/cancel`
-   - 取消长任务
-   - `queued` 可直接取消
-   - `running` 通过 Redis cancel 广播跨实例通知 worker 取消
-
-当前已实现的结构化事件包括：
-
-- `run_started`
-- `domain_plan_started`
-- `domain_plan_ready`
-- `domain_execute_started`
-- `domain_supervisor_fallback`
-- `run_waiting_input`
-- `agent_entered`
-- `agent_completed`
-- `knowledge_retrieve_started`
-- `knowledge_retrieve_finished`
-- `knowledge_answer_chunk`
-- `knowledge_answer_ready`
-- `itsm_interrupt_emitted`
-- `itsm_done`
-- `run_completed`
-- `run_failed`
-- `run_cancelled`
-
-其中领域计划相关事件的 payload 会携带：
-
-- `steps`：执行顺序
-- `step_details[]`：每个 step 的 `agent_key` 与 `reason`，用于解释路由决策原因
-
-队列可靠性语义：
-
-- worker 仅在 handler 成功后 `XACK`，失败消息会保留 pending
-- worker 启动后会通过 `XAUTOCLAIM` 回收 pending，避免崩溃后消息遗失
-- `TryStartRun` 保证同一个 run 只会被一个 worker 原子抢占执行
-
-断线重连约定：
-
-- 支持标准 `Last-Event-ID` 请求头
-- 同时支持 query 参数 `last_event_id`（便于网关或调试工具）
+- `waiting_input`
+- `done`
+- `failed`
+- `cancelled`
 
 ## 身份语义
 
@@ -200,9 +154,49 @@ Redis 在本仓库中是必需依赖。
 - 调知识库 RAG 时，把 `X-User-ID` 透传为 `x-user-upn`
 - 调 ITSM 前，通过 `UniAuth` 把 UPN 换成下游需要的 `employeeId`
 
+## 持久化
+
+SQLite：
+
+- `agent_sessions`
+- `agent_messages`
+- `agent_memories`
+- `agent_runs`
+- `agent_run_events`
+
+其中：
+
+- `agent_sessions + agent_messages` 是主产品恢复历史页面的事实来源
+- `agent_memories` 是长期记忆增强层
+- `agent_runs + agent_run_events` 主要服务调试和高级轨迹
+
+Redis：
+
+- 顶层助手 checkpoint：`lakeside:interactive:rootassistant:checkpoint:v1:`
+- ITSM checkpoint：`lakeside:interactive:it:subagent:itsm:checkpoint:v1:`
+- ITSM 幂等：`lakeside:interactive:it:subagent:itsm:idempotency:v1:`
+- 共享 embedding cache：`lakeside:shared:embedding:cache:v1:`
+- run 队列（Streams）：`agents.runtime.streamKey`
+- run 事件唤醒（Pub/Sub）：`agents.runtime.pubsubChannel`
+- run 取消广播（Pub/Sub）：`agents.runtime.pubsubChannel + ":cancel"`
+
+Redis 在本仓库中是必需依赖。
+
+## 高级轨迹
+
+高级轨迹默认关闭。
+
+当前产品策略：
+
+- 默认聊天页面不显示执行轨迹
+- 用户在前端 settings 中打开开关后，前端会给 `render/actions` 传 `advanced_trace=1`
+- 后端才会把 `agent_run_events` 映射成高级轨迹内容
+
+高级轨迹内容由内部 `agent_run_events` 映射生成，前端通过 `GET /sessions/{session_id}` 获取，不再单独暴露公开 `/runs*` HTTP 接口。
+
 ## 知识库接入
 
-Lakeside 不负责知识库管理，只复用独立 RAG 服务的检索接口：
+Lakeside 不负责知识库管理，只复用独立 RAG 服务：
 
 - `POST /v1/retrieve`
 - `POST /v1/documents/batch_get`
@@ -210,30 +204,21 @@ Lakeside 不负责知识库管理，只复用独立 RAG 服务的检索接口：
 knowledge 叶子 agent 负责：
 
 1. 按固定 `kb_id` 或 `kb_id[]` 检索
-2. 使用 Eino 官方 `flow/retriever/multiquery` 做查询改写与扩召回
+2. 使用 Eino 官方检索组件扩召回
 3. 补齐文件名
 4. 基于检索片段生成回答
 5. 返回来源与 `snippet`
 
-知识库上传、重建索引、权限同步仍然在独立 RAG 服务里完成，不在 Lakeside 内实现。
-
 ## ITSM 接入
 
-`itsm` 叶子 agent 保留当前自定义可中断状态机：
+`itsm` 叶子 agent 当前保留自定义可中断状态机：
 
 1. 抽取草稿
 2. 缺信息时 interrupt
 3. 二次确认时 interrupt
 4. 用户确认后提交下游 ITSM
 
-当前也保留：
-
-- 提交幂等保护
-- 相似问题聚合与服务级别升级
-
-中断取消约定：
-
-- `need_info` 与 `need_confirm` 阶段都支持通过 `resume.targets[interrupt_id].confirmed=false` 取消当前工单流程
+在主产品页面里，这些中断会通过 `render/actions` 映射成表单和确认卡片。
 
 ## 启动
 
@@ -241,7 +226,7 @@ knowledge 叶子 agent 负责：
 go run main.go
 ```
 
-运行模式（可通过环境变量 `MODE` 或 `server.mode` 指定）：
+运行模式：
 
 - `all`：HTTP + worker（默认）
 - `api`：仅 HTTP
@@ -255,17 +240,8 @@ go run main.go
 
 ## 测试
 
-单元测试：
-
 ```bash
 go test ./...
 ```
 
-联调说明见：
-
-- [TESTING.md](/home/nickw/lakeside/TESTING.md)
-
-设计文档见：
-
-- [SSE_AGENT_RUNTIME_PLAN.md](/home/nickw/lakeside/docs/SSE_AGENT_RUNTIME_PLAN.md)
-- [KNOWLEDGE_AGENT_DESIGN_GUIDELINES.md](/home/nickw/lakeside/docs/KNOWLEDGE_AGENT_DESIGN_GUIDELINES.md)
+联调流程见：[TESTING.md](./TESTING.md)

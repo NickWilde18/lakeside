@@ -363,6 +363,7 @@ func (a *TicketCreateAgent) needInfoInterrupt(lang string, draft TicketDraft, cl
 
 	internalMissing = uniqueStrings(internalMissing)
 	visibleMissing, enumDecisionPending := userVisibleMissingFields(internalMissing)
+	clarify = normalizeNeedInfoClarify(lang, draft, clarify)
 	prompt := localizedNeedInfoPrompt(lang, visibleMissing, clarify, enumDecisionPending)
 	info := &TicketInterruptInfo{
 		Type:          statusNeedInfo,
@@ -504,6 +505,43 @@ func userVisibleMissingFields(internalMissing []string) ([]string, bool) {
 		visible = append(visible, "othersDesc")
 	}
 	return uniqueStrings(visible), enumDecisionPending
+}
+
+func normalizeNeedInfoClarify(lang string, draft TicketDraft, clarify string) string {
+	clarify = strings.TrimSpace(clarify)
+	if detectTicketObject(draft) != "vpn" {
+		return clarify
+	}
+	if clarify == "" || looksLikeLocationClarify(clarify) {
+		return vpnClarifyPrompt(lang)
+	}
+	return clarify
+}
+
+func detectTicketObject(draft TicketDraft) string {
+	combined := compactSignalText(strings.Join([]string{draft.Subject, draft.OthersDesc}, " "))
+	domain := detectSignalDomain(combined)
+	return detectSignalObject(combined, domain)
+}
+
+func looksLikeLocationClarify(text string) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	if text == "" {
+		return false
+	}
+	return containsAny(
+		text,
+		"楼号", "房间号", "寝室", "宿舍", "楼栋", "位置", "地点", "具体楼号", "具体房间",
+		"building", "room", "dorm", "location",
+	)
+}
+
+func vpnClarifyPrompt(lang string) string {
+	return localizeText(
+		lang,
+		"请说明 VPN 连接失败的具体现象：是无法打开 VPN 登录页面、客户端提示连接错误，还是连接后仍无法访问校内资源？另外，请说明目前只有这一台设备或这个账号受影响，还是其他设备也有同样问题。",
+		"Please describe the exact VPN failure: can you not open the VPN login page, does the client show a connection error, or can you connect but still not access campus resources? Also clarify whether only this device or account is affected, or whether other devices have the same issue.",
+	)
 }
 
 func localizedNeedInfoPrompt(lang string, missing []string, clarify string, enumDecisionPending bool) string {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -22,65 +23,51 @@ type responseEnvelope[T any] struct {
 	Data    T      `json:"data"`
 }
 
-func TestAgentRunCreateLive(t *testing.T) {
+func TestAgentSessionsLive(t *testing.T) {
 	t.Helper()
 	if os.Getenv("LAKESIDE_RUN_LIVE_TESTS") != "1" {
 		t.Skip("set LAKESIDE_RUN_LIVE_TESTS=1 to enable live API tests")
 	}
 
-	resp := postAgentJSON[agentv1.AgentRunCreateRes](
+	resp := getAgentJSON[agentv1.AgentSessionsRes](t, "/v1/agent/"+assistantKey()+"/sessions?limit=5")
+	require.Equal(t, 0, resp.Code)
+	require.Equal(t, "OK", resp.Message)
+	require.Equal(t, assistantKey(), resp.Data.AssistantKey)
+}
+
+func TestAgentRenderLive(t *testing.T) {
+	t.Helper()
+	if os.Getenv("LAKESIDE_RUN_LIVE_TESTS") != "1" {
+		t.Skip("set LAKESIDE_RUN_LIVE_TESTS=1 to enable live API tests")
+	}
+
+	body := getAgentStreamBody(t, "/v1/agent/"+assistantKey()+"/render")
+	require.Contains(t, body, "\"beginRendering\"")
+	require.Contains(t, body, "\"surfaceUpdate\"")
+}
+
+func TestAgentActionsLive(t *testing.T) {
+	t.Helper()
+	if os.Getenv("LAKESIDE_RUN_LIVE_TESTS") != "1" {
+		t.Skip("set LAKESIDE_RUN_LIVE_TESTS=1 to enable live API tests")
+	}
+	body := postAgentStreamBody(
 		t,
-		"/v1/agent/"+assistantKey()+"/runs",
+		"/v1/agent/"+assistantKey()+"/actions",
 		map[string]any{
-			"message": envOrDefault("LAKESIDE_LIVE_QUERY_MESSAGE", "宿舍 WiFi 坏了，帮我报修"),
+			"userAction": map[string]any{
+				"name":              "send_message",
+				"surfaceId":         "agent-canvas",
+				"sourceComponentId": "composer-send",
+				"timestamp":         time.Now().UTC().Format(time.RFC3339),
+				"context": map[string]any{
+					"message": envOrDefault("LAKESIDE_LIVE_QUERY_MESSAGE", "学生群组邮箱地址是什么？"),
+				},
+			},
 		},
 	)
-
-	require.Equal(t, 0, resp.Code)
-	require.Equal(t, "OK", resp.Message)
-	require.NotEmpty(t, resp.Data.RunID)
-	require.NotEmpty(t, resp.Data.SessionID)
-	require.NotEmpty(t, resp.Data.RunStatus)
-}
-
-func TestAgentRunGetLive(t *testing.T) {
-	t.Helper()
-	if os.Getenv("LAKESIDE_RUN_LIVE_TESTS") != "1" {
-		t.Skip("set LAKESIDE_RUN_LIVE_TESTS=1 to enable live API tests")
-	}
-	runID := strings.TrimSpace(os.Getenv("LAKESIDE_LIVE_RUN_ID"))
-	if runID == "" {
-		t.Skip("set LAKESIDE_LIVE_RUN_ID to an existing run id")
-	}
-	resp := getAgentJSON[agentv1.AgentRunGetRes](t, "/v1/agent/"+assistantKey()+"/runs/"+runID)
-	require.Equal(t, 0, resp.Code)
-	require.Equal(t, "OK", resp.Message)
-	require.Equal(t, runID, resp.Data.RunID)
-	require.NotEmpty(t, resp.Data.RunStatus)
-}
-
-func TestAgentRunResumeLive(t *testing.T) {
-	t.Helper()
-	if os.Getenv("LAKESIDE_RUN_LIVE_TESTS") != "1" {
-		t.Skip("set LAKESIDE_RUN_LIVE_TESTS=1 to enable live API tests")
-	}
-	runID := strings.TrimSpace(os.Getenv("LAKESIDE_LIVE_RESUME_RUN_ID"))
-	if runID == "" {
-		t.Skip("set LAKESIDE_LIVE_RESUME_RUN_ID to a waiting_input run id")
-	}
-	body := strings.TrimSpace(os.Getenv("LAKESIDE_LIVE_RESUME_BODY"))
-	if body == "" {
-		t.Skip("set LAKESIDE_LIVE_RESUME_BODY to a full JSON request body containing targets")
-	}
-	var payload map[string]any
-	require.NoError(t, json.Unmarshal([]byte(body), &payload))
-
-	resp := postAgentJSON[agentv1.AgentRunResumeRes](t, "/v1/agent/"+assistantKey()+"/runs/"+runID+"/resume", payload)
-	require.Equal(t, 0, resp.Code)
-	require.Equal(t, "OK", resp.Message)
-	require.NotEmpty(t, resp.Data.RunID)
-	require.NotEmpty(t, resp.Data.SessionID)
-	require.NotEmpty(t, resp.Data.RunStatus)
+	require.Contains(t, body, "\"beginRendering\"")
+	require.True(t, strings.Contains(body, "\"dataModelUpdate\"") || strings.Contains(body, "\"surfaceUpdate\""))
 }
 
 func postAgentJSON[T any](t *testing.T, path string, payload map[string]any) responseEnvelope[T] {
@@ -123,6 +110,48 @@ func getAgentJSON[T any](t *testing.T, path string) responseEnvelope[T] {
 	return out
 }
 
+func getAgentStreamBody(t *testing.T, path string) string {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, baseURL()+path, nil)
+	require.NoError(t, err)
+	req.Header.Set("Accept", "application/x-ndjson")
+	req.Header.Set("X-User-ID", envOrDefault("LAKESIDE_TEST_USER_ID", "122020255@link.cuhk.edu.cn"))
+
+	client := &http.Client{Timeout: liveHTTPTimeout()}
+	httpResp, err := client.Do(req)
+	require.NoError(t, err)
+	defer httpResp.Body.Close()
+
+	require.Equal(t, http.StatusOK, httpResp.StatusCode)
+	require.Contains(t, httpResp.Header.Get("Content-Type"), "application/x-ndjson")
+	body, err := io.ReadAll(httpResp.Body)
+	require.NoError(t, err)
+	return string(body)
+}
+
+func postAgentStreamBody(t *testing.T, path string, payload map[string]any) string {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, baseURL()+path, bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Accept", "application/x-ndjson")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User-ID", envOrDefault("LAKESIDE_TEST_USER_ID", "122020255@link.cuhk.edu.cn"))
+
+	client := &http.Client{Timeout: liveHTTPTimeout()}
+	httpResp, err := client.Do(req)
+	require.NoError(t, err)
+	defer httpResp.Body.Close()
+
+	require.Equal(t, http.StatusOK, httpResp.StatusCode)
+	require.Contains(t, httpResp.Header.Get("Content-Type"), "application/x-ndjson")
+	responseBody, err := io.ReadAll(httpResp.Body)
+	require.NoError(t, err)
+	return string(responseBody)
+}
+
 func baseURL() string {
 	return envOrDefault("LAKESIDE_BASE_URL", "http://127.0.0.1:8011")
 }
@@ -151,5 +180,5 @@ func liveHTTPTimeout() time.Duration {
 }
 
 func TestLiveEnvExamples(t *testing.T) {
-	t.Skip(fmt.Sprintf("example: LAKESIDE_RUN_LIVE_TESTS=1 LAKESIDE_TEST_USER_ID=122020255 go test ./test/integration -run Live"))
+	t.Skip(fmt.Sprintf("example: LAKESIDE_RUN_LIVE_TESTS=1 LAKESIDE_TEST_USER_ID=122020255@link.cuhk.edu.cn go test ./test/integration -run Live"))
 }

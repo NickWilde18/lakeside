@@ -94,6 +94,31 @@ func TestNeedInfoInterruptUsesEnglishPromptForEnglishUsers(t *testing.T) {
 	}
 }
 
+func TestNeedInfoInterruptUsesVPNSpecificClarifyPrompt(t *testing.T) {
+	agent := NewTicketCreateAgent(nil, nil, nil, nil, nil, serviceConfig{EnumConfidenceThreshold: 0.75})
+	info, incomplete := agent.needInfoInterrupt("zh", TicketDraft{
+		UserCode:               "122020255",
+		Subject:                "VPN 无法连接",
+		ServiceLevel:           "3",
+		ServiceLevelConfidence: 0.4,
+		Priority:               "3",
+		PriorityConfidence:     1,
+		OthersDesc:             "VPN 连不上，客户端报错。",
+	}, "请问您是在哪里尝试连接VPN（具体楼号和房间号）？另外，请问连接失败的具体现象是什么？")
+	if !incomplete {
+		t.Fatalf("expected incomplete draft")
+	}
+	if strings.Contains(info.Prompt, "楼号") || strings.Contains(info.Prompt, "房间号") {
+		t.Fatalf("vpn prompt should not ask for building or room, got %q", info.Prompt)
+	}
+	if !strings.Contains(info.Prompt, "登录页面") {
+		t.Fatalf("vpn prompt should ask about login page / client error / campus resource access, got %q", info.Prompt)
+	}
+	if !strings.Contains(info.Prompt, "其他设备") {
+		t.Fatalf("vpn prompt should ask about impact scope, got %q", info.Prompt)
+	}
+}
+
 func TestDetectUserLanguage(t *testing.T) {
 	if got := detectUserLanguage("宿舍 WiFi 坏了"); got != "zh" {
 		t.Fatalf("detectUserLanguage chinese got %q", got)
@@ -116,5 +141,11 @@ func TestBuildExtractPromptContainsServiceLevelAndPriorityRules(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "跨用户集中爆发的升级由系统在提交前根据近期相似工单聚合结果处理") {
 		t.Fatalf("prompt should mention server-side escalation, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "对 VPN 问题，完整信息优先覆盖") {
+		t.Fatalf("prompt should contain vpn-specific guidance, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "不要默认追问楼号和房间号") {
+		t.Fatalf("prompt should forbid location-first vpn clarify question, got %q", prompt)
 	}
 }

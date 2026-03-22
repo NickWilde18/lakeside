@@ -364,6 +364,59 @@ func (r *sqliteRepository) DeleteSession(ctx context.Context, assistantKey, sess
 	return err
 }
 
+func (r *sqliteRepository) PurgeDeletedSessions(ctx context.Context, olderThan time.Time, limit int) (int, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	var rows []struct {
+		SessionID string `orm:"session_id"`
+	}
+	if err := r.db.Model(tableAgentSessions).Ctx(ctx).
+		Fields("session_id").
+		Where("status", statusDeleted).
+		WhereLTE("updated_at", olderThan).
+		OrderAsc("updated_at").
+		Limit(limit).
+		Scan(&rows); err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	sessionIDs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if strings.TrimSpace(row.SessionID) == "" {
+			continue
+		}
+		sessionIDs = append(sessionIDs, row.SessionID)
+	}
+	if len(sessionIDs) == 0 {
+		return 0, nil
+	}
+	err := r.db.Transaction(ctx, func(ctx context.Context, tx gdb.TX) error {
+		if _, err := tx.Model(tableAgentRunEvents).Ctx(ctx).WhereIn("session_id", sessionIDs).Delete(); err != nil {
+			return err
+		}
+		if _, err := tx.Model(tableAgentRuns).Ctx(ctx).WhereIn("session_id", sessionIDs).Delete(); err != nil {
+			return err
+		}
+		if _, err := tx.Model(tableAgentMessages).Ctx(ctx).WhereIn("session_id", sessionIDs).Delete(); err != nil {
+			return err
+		}
+		if _, err := tx.Model(tableAgentSessions).Ctx(ctx).
+			Where("status", statusDeleted).
+			WhereIn("session_id", sessionIDs).
+			Delete(); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(sessionIDs), nil
+}
+
 func (r *sqliteRepository) AppendMessage(ctx context.Context, message MessageRecord) (int64, error) {
 	result, err := r.db.Model(tableAgentMessages).Ctx(ctx).Data(g.Map{
 		"assistant_key":    message.AssistantKey,

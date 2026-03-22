@@ -14,6 +14,7 @@ import (
 	"lakeside/internal/service/domainassistant"
 	leafitsm "lakeside/internal/service/leafagent/itsm"
 	leafknowledge "lakeside/internal/service/leafagent/knowledge"
+	"lakeside/internal/service/moduleapi"
 	"lakeside/internal/service/rootassistant"
 )
 
@@ -52,7 +53,7 @@ func newRuntimeRegistry(ctx context.Context, cfg *config) (*runtimeRegistry, err
 			}
 			infos[leaf.Key] = nodeInfo{Key: leaf.Key, Description: agent.Description(ctx), Kind: leaf.Type}
 		case "knowledge":
-			agent := leafknowledge.New(ctx, leafknowledge.Config{
+			tool := leafknowledge.NewTool(ctx, leafknowledge.Config{
 				Key:            leaf.Key,
 				Description:    leaf.Description,
 				KBIDs:          leaf.KBIDs,
@@ -61,12 +62,14 @@ func newRuntimeRegistry(ctx context.Context, cfg *config) (*runtimeRegistry, err
 				MaxContextDocs: leaf.MaxContextDocs,
 				SourceLimit:    leaf.SourceLimit,
 			}, rag, chatModel)
+			agent := leafknowledge.NewFromTool(leaf.Key, leaf.Description, tool)
 			leafAgents[leaf.Key] = agent
 			leafBindings[leaf.Key] = domainassistant.LeafBinding{
 				Key:           leaf.Key,
 				Description:   leaf.Description,
 				Kind:          leaf.Type,
 				Interruptible: false,
+				Tool:          tool,
 				Agent:         agent,
 			}
 			infos[leaf.Key] = nodeInfo{Key: leaf.Key, Description: leaf.Description, Kind: leaf.Type}
@@ -75,39 +78,36 @@ func newRuntimeRegistry(ctx context.Context, cfg *config) (*runtimeRegistry, err
 		}
 	}
 
-	domainAgents := make(map[string]adk.Agent)
+	domainModules := make(map[string]moduleapi.Module)
 	for _, domain := range cfg.Domains {
-		children := make([]adk.Agent, 0, len(domain.Children))
 		orderedLeaves := make([]domainassistant.LeafBinding, 0, len(domain.Children))
 		for _, childKey := range domain.Children {
-			agent, ok := leafAgents[childKey]
-			if !ok {
-				return nil, fmt.Errorf("build domain %s failed: unknown child key %s", domain.Key, childKey)
-			}
 			binding, ok := leafBindings[childKey]
 			if !ok {
 				return nil, fmt.Errorf("build domain %s failed: missing leaf binding %s", domain.Key, childKey)
 			}
-			children = append(children, agent)
 			orderedLeaves = append(orderedLeaves, binding)
 		}
 		instruction := renderInstruction(domain.InstructionTemplate, domain.Key, childCatalog(domain.Children, infos))
-		agent, err := domainassistant.New(ctx, domain.Key, domain.Description, instruction, domain.MaxIterations, children, orderedLeaves)
+		module, err := domainassistant.New(ctx, domain.Key, domain.Description, instruction, domain.MaxIterations, orderedLeaves)
 		if err != nil {
 			return nil, err
 		}
-		domainAgents[domain.Key] = agent
+		if module == nil {
+			return nil, fmt.Errorf("build domain %s failed: module is nil", domain.Key)
+		}
+		domainModules[domain.Key] = module
 		infos[domain.Key] = nodeInfo{Key: domain.Key, Description: domain.Description, Kind: "domain"}
 	}
 
 	bundles := make(map[string]*runnerBundle)
 	for _, root := range cfg.Roots {
-		children, err := collectChildren(root.Children, leafAgents, domainAgents)
+		modules, err := collectModules(root.Children, domainModules)
 		if err != nil {
 			return nil, fmt.Errorf("build root %s failed: %w", root.Key, err)
 		}
 		instruction := renderInstruction(root.InstructionTemplate, root.Key, childCatalog(root.Children, infos))
-		agent, err := rootassistant.New(ctx, root.Key, root.Description, instruction, root.MaxIterations, children)
+		agent, err := rootassistant.New(ctx, root.Key, root.Description, instruction, root.MaxIterations, modules)
 		if err != nil {
 			return nil, err
 		}
@@ -136,20 +136,14 @@ func newRuntimeRegistry(ctx context.Context, cfg *config) (*runtimeRegistry, err
 	return &runtimeRegistry{bundles: bundles, infos: infos, paths: paths, names: names}, nil
 }
 
-func collectChildren(keys []string, leaves map[string]adk.Agent, domains map[string]adk.Agent) ([]adk.Agent, error) {
-	children := make([]adk.Agent, 0, len(keys))
+func collectModules(keys []string, modules map[string]moduleapi.Module) ([]moduleapi.Module, error) {
+	children := make([]moduleapi.Module, 0, len(keys))
 	for _, key := range keys {
-		if agent, ok := leaves[key]; ok {
-			children = append(children, agent)
-			continue
+		module, ok := modules[strings.TrimSpace(key)]
+		if !ok || module == nil {
+			return nil, fmt.Errorf("unknown child module key: %s", key)
 		}
-		if domains != nil {
-			if agent, ok := domains[key]; ok {
-				children = append(children, agent)
-				continue
-			}
-		}
-		return nil, fmt.Errorf("unknown child key: %s", key)
+		children = append(children, module)
 	}
 	return children, nil
 }

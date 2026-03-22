@@ -7,7 +7,36 @@ import (
 
 	"github.com/gogf/gf/v2/errors/gcode"
 	"github.com/gogf/gf/v2/errors/gerror"
+	"github.com/google/uuid"
 )
+
+func (s *Service) CreateSession(ctx context.Context, req *CreateSessionRequest) (*CreateSessionResult, error) {
+	if req == nil || strings.TrimSpace(req.AssistantKey) == "" || strings.TrimSpace(req.UserUPN) == "" {
+		return nil, gerror.NewCode(gcode.CodeMissingParameter, "assistant_key and X-User-ID are required")
+	}
+	assistantKey := strings.TrimSpace(req.AssistantKey)
+	userUPN := strings.TrimSpace(req.UserUPN)
+	now := time.Now()
+	sessionID := "sess-" + uuid.NewString()
+	language := chooseLanguage(strings.TrimSpace(req.Language), "zh")
+	if err := s.repo.SaveSession(ctx, SessionRecord{
+		AssistantKey:     assistantKey,
+		SessionID:        sessionID,
+		UserUPN:          userUPN,
+		ActivePathJSON:   marshalPath([]string{assistantKey}),
+		ActiveCheckpoint: "",
+		Status:           statusActive,
+		Language:         language,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}); err != nil {
+		return nil, err
+	}
+	return &CreateSessionResult{
+		AssistantKey: assistantKey,
+		SessionID:    sessionID,
+	}, nil
+}
 
 func (s *Service) ListSessions(ctx context.Context, req *ListSessionsRequest) ([]SessionSummary, error) {
 	if req == nil || strings.TrimSpace(req.AssistantKey) == "" || strings.TrimSpace(req.UserUPN) == "" {
@@ -111,12 +140,33 @@ func (s *Service) DeleteSession(ctx context.Context, req *DeleteSessionRequest) 
 	if len(runs) > 0 {
 		lastRun := runs[len(runs)-1]
 		switch strings.TrimSpace(lastRun.Status) {
-		case runStatusQueued, runStatusRunning, runStatusWaitingInput:
-			return gerror.NewCode(gcode.CodeOperationFailed, "cannot delete a session with an active or resumable run")
+		case runStatusQueued, runStatusRunning:
+			return gerror.NewCode(gcode.CodeOperationFailed, "cannot delete a session with an active run")
+		case runStatusWaitingInput:
+			if err := s.abandonWaitingInputRun(ctx, session, &lastRun); err != nil {
+				return err
+			}
 		}
 	}
 
 	return s.repo.DeleteSession(ctx, strings.TrimSpace(req.AssistantKey), strings.TrimSpace(req.SessionID), strings.TrimSpace(req.UserUPN), time.Now())
+}
+
+func (s *Service) abandonWaitingInputRun(ctx context.Context, session *SessionRecord, run *RunRecord) error {
+	if s == nil || session == nil || run == nil {
+		return nil
+	}
+	errorMessage := localizeText(session.Language, "会话已删除，当前流程已放弃。", "Session deleted; pending flow abandoned.")
+	activePath := unmarshalPath(session.ActivePathJSON)
+	resp := s.errorResponse(run.AssistantKey, run.SessionID, pathOrDefault(activePath, run.AssistantKey), errorMessage)
+	resp.CheckpointID = ""
+	if err := s.repo.FinishRun(ctx, run.RunID, runStatusCancelled, toJSONString(resp), "", errorMessage, time.Now()); err != nil {
+		return err
+	}
+	s.invalidateCheckpoint(ctx, run.AssistantKey, run.CheckpointID)
+	runCtx := s.withRunContext(ctx, run.RunID, run.AssistantKey, run.SessionID)
+	s.emitFinalRunEvent(runCtx, runStatusCancelled, resp, errorMessage)
+	return nil
 }
 
 func buildSessionSummary(session SessionRecord, messages []MessageRecord, runs []RunRecord) SessionSummary {

@@ -126,8 +126,10 @@ func buildExtractPrompt(current TicketDraft, userInput string, assistantContext 
 - 必须只返回 JSON 对象，不要输出解释，不要输出 Markdown。
 - subject 和 othersDesc 要简洁、可直接用于创建工单。
 - 即使没有单独字段，地点、故障现象、影响范围等关键信息也要尽量体现在 subject 和 othersDesc 中。
-- WiFi/网络故障类问题，完整信息优先覆盖：地点、故障现象、影响范围。
-- 如果缺地点，clarify_question 优先追问楼号和房间号。
+- 校内 WiFi / 有线网络 / 网页访问等现场网络故障，完整信息优先覆盖：地点、故障现象、影响范围。
+- 对 VPN 问题，完整信息优先覆盖：失败现象、影响范围，以及当前使用的网络环境（例如家庭网络、手机热点、校内网络）；不要默认追问楼号和房间号。
+- 只有当问题明显是校内现场网络故障（如宿舍 WiFi、教室网络、办公室有线网络）且缺地点时，clarify_question 才优先追问楼号和房间号。
+- 对 VPN 问题，如果缺信息，clarify_question 优先追问：无法打开 VPN 登录页面、客户端提示连接错误、还是连接后无法访问校内资源；以及是单个设备/账号受影响，还是多个设备都受影响。
 - 如果缺故障现象，clarify_question 优先追问是搜不到信号、连上没网、间歇断连，还是其他具体现象。
 - 如果缺影响范围，clarify_question 优先追问是单个设备、多台设备，还是整间宿舍/整个房间受影响。
 - serviceLevel 判定规则：
