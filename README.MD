@@ -19,7 +19,7 @@ Lakeside 是一个面向校园场景的分层 Agent 平台。当前主产品实�
 | --- | --- | --- | --- |
 | Root | `campus` | 顶层总控，做模块 assessment、route plan、fan-out 与结果合并 | 已启用 |
 | Domain | `it` | 校园 IT 领域编排，执行 `assessment + planner + workflow` | 已启用 |
-| Leaf | `campus_it_kb` | 面向普通师生的校园 IT 知识检索与回答 | 已启用 |
+| Leaf | `campus_it_kb` | 面向普通师生的校园 IT 知识检索 tool，通过外部 RAG 服务回答 | 已启用 |
 | Leaf | `itsm` | 正式 IT 支持流程，支持补信息、确认、提单 | 已启用 |
 | Leaf | `campus_it_kb_for_itso_student_assistant` | ITSO 学生助理内部知识 | 预留，当前配置未启用 |
 
@@ -61,6 +61,7 @@ graph TB
 - 领域模块统一走 `assessment + planner + workflow`，不再保留 supervisor fallback。
 - `knowledge` 优先实现为 tool，再包一层薄 agent adapter 以兼容当前编排。
 - `itsm` 作为中断型叶子 agent，专门处理正式流程，不负责优先回答 FAQ 或排障步骤。
+- Redis 只承担 checkpoint、runtime queue、幂等和缓存等平台职责，不承载知识库语义。
 - 主产品以 `session + messages` 为事实来源，长期记忆只作为增强注入。
 - `render/actions` 只负责中间聊天区的 chat surface，不接管整页。
 
@@ -71,8 +72,8 @@ graph TB
 | Agent Platform | registry、runtime、checkpoint、session、memory、response、worker | `internal/service/agentplatform/` |
 | Root Assistant | 顶层问题域路由、模块并发/串行编排、结果合并 | `internal/service/rootassistant/` |
 | Domain Assistant | 领域 assessment、planner、叶子工作流编排 | `internal/service/domainassistant/` |
-| Leaf Agent / Tool | 具体能力执行，如知识检索、ITSM 提单 | `internal/service/leafagent/` |
-| Infra | 外部系统适配，如 RAG、Redis、UniAuth | `internal/infra/` |
+| Leaf Agent / Tool | 具体能力执行，如知识检索 tool、ITSM 提单 | `internal/service/leafagent/` |
+| Infra | 外部系统适配，如 RAG 服务、Redis、UniAuth | `internal/infra/` |
 
 ## Campus 的真实执行逻辑
 
@@ -115,7 +116,7 @@ Root 层的策略是：
 
 | 叶子能力 | 类型 | 适合处理的问题 | 是否会中断 |
 | --- | --- | --- | --- |
-| `campus_it_kb` | Knowledge tool + thin agent adapter | FAQ、操作步骤、安装指引、排障建议、流程说明 | 否 |
+| `campus_it_kb` | Knowledge tool + thin agent adapter | FAQ、操作步骤、安装指引、排障建议、流程说明；底层调用外部 RAG 服务 | 否 |
 | `itsm` | Interruptible agent | 报修、投诉、正式 IT 支持请求、提交工单 | 是 |
 
 这意味着：
@@ -123,6 +124,12 @@ Root 层的策略是：
 - “VPN 怎么连接 / WiFi 连不上怎么办”应优先走 `knowledge`
 - “还是不行，帮我提交工单”应走 `itsm`
 - “先告诉我怎么排查，再帮我提工单”会先 `knowledge`，再 `itsm`
+
+补充说明：
+
+- `knowledge` 的实现形态是 Eino `tool`
+- 当前之所以还能在 `leafagent/knowledge` 下拿到 agent，是为了兼容现有 workflow 编排的薄 adapter
+- Redis 不是知识库，也不负责存放 RAG 文档
 
 ## 一次典型请求的时序
 
@@ -250,6 +257,15 @@ sequenceDiagram
 | `agents.runtime.pubsubChannel` | run 事件广播 |
 
 Redis 在本仓库中是**必需依赖**。
+
+但 Redis 的作用仅限于平台运行时：
+
+- checkpoint
+- idempotency
+- runtime queue / pubsub
+- embedding cache
+
+知识检索本身走的是外部 RAG 服务，而不是 Redis。
 
 ## 身份语义
 
