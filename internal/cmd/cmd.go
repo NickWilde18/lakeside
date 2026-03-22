@@ -10,7 +10,6 @@ import (
 	"github.com/gogf/gf/v2/os/gcmd"
 
 	"lakeside/internal/controller/agent"
-	"lakeside/internal/controller/hello"
 	"lakeside/internal/controller/itsm"
 	"lakeside/internal/openapi"
 	"lakeside/internal/service/agentplatform"
@@ -60,7 +59,6 @@ func startHTTPServer(ctx context.Context) {
 		group.Middleware(ghttp.MiddlewareHandlerResponse)
 		group.Bind(
 			agent.NewV1(),
-			hello.NewV1(),
 			itsm.NewV1(),
 		)
 	})
