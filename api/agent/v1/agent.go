@@ -35,6 +35,62 @@ type AgentResult struct {
 	Sources  []AgentSource `json:"sources,omitempty" dc:"最终结果引用的知识来源列表，仅知识库场景返回"`
 }
 
+// AgentDeerFlowTraceSource 表示 DeerFlow 研究过程里提取出的来源条目。
+type AgentDeerFlowTraceSource struct {
+	Title         string `json:"title,omitempty" dc:"来源标题" example:"Pricing - Overview - Z.AI DEVELOPER DOCUMENT"`
+	URL           string `json:"url,omitempty" dc:"来源 URL" example:"https://docs.z.ai/guides/overview/pricing"`
+	Domain        string `json:"domain,omitempty" dc:"归一化后的域名" example:"docs.z.ai"`
+	Snippet       string `json:"snippet,omitempty" dc:"来源摘要预览" example:"This page provides pricing information for Z.AI’s models and tools."`
+	Query         string `json:"query,omitempty" dc:"触发该来源的查询词" example:"GLM-5 pricing official API"`
+	ToolName      string `json:"tool_name,omitempty" dc:"产生该来源的 DeerFlow 工具名" example:"web_search"`
+	ToolCallID    string `json:"tool_call_id,omitempty" dc:"产生该来源的 DeerFlow tool_call_id" example:"web_search:3"`
+	SourceType    string `json:"source_type,omitempty" dc:"来源分类，例如 official / benchmark / provider / media / community" example:"official"`
+	Quality       string `json:"quality,omitempty" dc:"归一化质量等级，例如 high / medium / low" example:"high"`
+	LowConfidence bool   `json:"low_confidence,omitempty" dc:"是否为低可信来源" example:"false"`
+}
+
+// AgentDeerFlowTraceToolCall 表示 DeerFlow 处理过程中的一次工具调用。
+type AgentDeerFlowTraceToolCall struct {
+	ID      string                    `json:"id,omitempty" dc:"tool_call_id" example:"web_search:2"`
+	Name    string                    `json:"name,omitempty" dc:"工具名" example:"web_search"`
+	Args    map[string]any            `json:"args,omitempty" dc:"工具入参"`
+	Result  any                       `json:"result,omitempty" dc:"归一化后的工具结果预览"`
+	Status  string                    `json:"status,omitempty" dc:"工具执行状态" example:"success"`
+	Error   string                    `json:"error,omitempty" dc:"工具失败时的错误摘要" example:"Query is too short"`
+	Sources []AgentDeerFlowTraceSource `json:"sources,omitempty" dc:"从工具结果里抽取出的来源列表"`
+}
+
+// AgentDeerFlowTraceMessage 表示 DeerFlow 线程状态中的一条归一化消息。
+type AgentDeerFlowTraceMessage struct {
+	ID         string                     `json:"id,omitempty" dc:"消息 ID" example:"lc_run--019d1903-fd45-72e1-ae35-040709acc8d8-0"`
+	Type       string                     `json:"type,omitempty" dc:"消息类型：human / ai / tool" example:"ai"`
+	Name       string                     `json:"name,omitempty" dc:"工具消息的工具名；其余消息通常为空" example:"web_search"`
+	Content    string                     `json:"content,omitempty" dc:"消息正文或归一化预览"`
+	Reasoning  string                     `json:"reasoning,omitempty" dc:"从 think 标签或 reasoning_content 提取出的思考内容"`
+	ToolCallID string                     `json:"tool_call_id,omitempty" dc:"tool 消息关联的 tool_call_id" example:"web_search:2"`
+	ToolCalls  []AgentDeerFlowTraceToolCall `json:"tool_calls,omitempty" dc:"ai 消息里声明的工具调用列表"`
+	Status     string                     `json:"status,omitempty" dc:"tool 消息状态" example:"success"`
+}
+
+// AgentDeerFlowTraceTodo 表示 DeerFlow plan mode 的 todo 项。
+type AgentDeerFlowTraceTodo struct {
+	Content string `json:"content,omitempty" dc:"todo 内容" example:"核对两家官方定价页"`
+	Status  string `json:"status,omitempty" dc:"todo 状态：pending / in_progress / completed" example:"completed"`
+}
+
+// AgentDeerFlowTrace 表示 DeerFlow research run 的归一化线程状态。
+type AgentDeerFlowTrace struct {
+	ThreadID  string                    `json:"thread_id,omitempty" dc:"DeerFlow thread_id" example:"99f15171-a5d7-4303-91cd-ce52786f2d7d"`
+	RunID     string                    `json:"run_id,omitempty" dc:"DeerFlow run_id" example:"019d1903-fd45-72e1-ae35-040709acc8d8"`
+	RunStatus string                    `json:"run_status,omitempty" dc:"DeerFlow 运行状态" example:"success"`
+	Title     string                    `json:"title,omitempty" dc:"DeerFlow 自动生成的标题" example:"Kimi K2.5 vs GLM-5 Feature Comparison"`
+	StateTail string                    `json:"state_tail,omitempty" dc:"失败诊断时保留的 state 尾部摘要" example:"step=25 | ai[tool_calls=3] | tool:web_fetch[error]{Timeout}"`
+	Messages  []AgentDeerFlowTraceMessage `json:"messages,omitempty" dc:"归一化后的 DeerFlow 消息列表"`
+	Todos     []AgentDeerFlowTraceTodo  `json:"todos,omitempty" dc:"plan mode todo 列表"`
+	Artifacts []string                  `json:"artifacts,omitempty" dc:"DeerFlow 产出的文件路径"`
+	Sources   []AgentDeerFlowTraceSource `json:"sources,omitempty" dc:"汇总后的来源列表"`
+}
+
 // AgentRunSnapshot 表示一次 run 的完整快照。
 type AgentRunSnapshot struct {
 	RunID        string                  `json:"run_id" dc:"当前执行 run ID" example:"run-8f4b6d3b"`
@@ -47,6 +103,8 @@ type AgentRunSnapshot struct {
 	Steps        []AgentStep             `json:"steps,omitempty" dc:"本轮编排过程的步骤结果列表；可同时包含 knowledge 回答与 ITSM interrupt"`
 	Interrupts   []itsmv1.AgentInterrupt `json:"interrupts,omitempty" dc:"为了兼容前端直接处理 interrupt，保留顶层中断详情列表；通常与最后一个 itsm_interrupt step 对应"`
 	Result       *AgentResult            `json:"result,omitempty" dc:"流程结束时的统一执行结果"`
+	DeerFlow     *AgentDeerFlowTrace     `json:"deerflow,omitempty" dc:"research 场景下 DeerFlow 线程状态的归一化快照"`
+	ProviderData map[string]any          `json:"provider_data,omitempty" dc:"底层 provider 附加诊断字段，例如 deerflow_thread_id / deerflow_state_tail"`
 	ErrorMessage string                  `json:"error_message,omitempty" dc:"run 失败或取消时的错误说明" example:"service restarted before run completed"`
 	StartedAt    string                  `json:"started_at,omitempty" dc:"run 开始时间" example:"2026-03-11T21:30:00+08:00"`
 	FinishedAt   string                  `json:"finished_at,omitempty" dc:"run 结束时间；未结束时为空" example:"2026-03-11T21:30:12+08:00"`

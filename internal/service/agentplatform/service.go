@@ -584,6 +584,48 @@ func (s *Service) buildAssistantContext(ctx context.Context, assistantKey, userU
 	)), nil
 }
 
+func (s *Service) buildProviderSessionValues(ctx context.Context, sessionID string) g.Map {
+	values := g.Map{}
+	threadID := s.latestProviderString(ctx, sessionID, "deerflow_thread_id")
+	if threadID != "" {
+		values["deerflow_thread_id"] = threadID
+	}
+	return values
+}
+
+func (s *Service) latestProviderString(ctx context.Context, sessionID, providerKey string) string {
+	if s == nil || s.repo == nil {
+		return ""
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	providerKey = strings.TrimSpace(providerKey)
+	if sessionID == "" || providerKey == "" {
+		return ""
+	}
+	messages, err := s.repo.ListRecentMessages(ctx, sessionID, recentConversationContextLimit)
+	if err != nil || len(messages) == 0 {
+		return ""
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		message := messages[i]
+		if strings.TrimSpace(message.Role) != "assistant" || strings.TrimSpace(message.PayloadJSON) == "" {
+			continue
+		}
+		resp, decodeErr := decodeJSON[Response](message.PayloadJSON)
+		if decodeErr != nil || resp.ProviderData == nil {
+			continue
+		}
+		value, ok := resp.ProviderData[providerKey]
+		if !ok {
+			continue
+		}
+		if text := strings.TrimSpace(fmt.Sprintf("%v", value)); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
 const (
 	recentConversationContextLimit    = 12
 	recentConversationMessageMaxRunes = 280
@@ -706,7 +748,11 @@ func (s *Service) invalidateCheckpoint(ctx context.Context, assistantKey, checkp
 }
 
 func (s *Service) errorResponse(assistantKey, sessionID string, activePath []string, message string) *Response {
-	return &Response{
+	return s.errorResponseWithProviderData(assistantKey, sessionID, activePath, message, nil)
+}
+
+func (s *Service) errorResponseWithProviderData(assistantKey, sessionID string, activePath []string, message string, providerData map[string]any) *Response {
+	resp := &Response{
 		AssistantKey: strings.TrimSpace(assistantKey),
 		Status:       "error",
 		SessionID:    sessionID,
@@ -716,6 +762,13 @@ func (s *Service) errorResponse(assistantKey, sessionID string, activePath []str
 			Message: message,
 		},
 	}
+	if len(providerData) > 0 {
+		resp.ProviderData = make(map[string]any, len(providerData))
+		for key, value := range providerData {
+			resp.ProviderData[key] = value
+		}
+	}
+	return resp
 }
 
 func (s *Service) validateCreateRunRequest(req *CreateRunRequest) error {

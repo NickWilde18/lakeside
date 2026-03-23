@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -41,11 +42,12 @@ func TestBuildA2UIRenderMessages(t *testing.T) {
 	require.NotNil(t, components[0].Component["Column"])
 
 	contents := messages[2].DataModel.Contents
-	require.Len(t, contents, 4)
+	require.Len(t, contents, 5)
 	require.Equal(t, "meta", contents[0].Key)
 	require.Equal(t, "composer", contents[1].Key)
 	require.NotEmpty(t, contents[0].ValueMap)
 	require.Equal(t, "assistantKey", contents[0].ValueMap[0].Key)
+	require.Equal(t, "deerflow", contents[4].Key)
 }
 
 func TestParseActionHelpers(t *testing.T) {
@@ -140,4 +142,46 @@ func TestBuildChatComponentsAddsCancelButtonForNeedInfoInterrupt(t *testing.T) {
 	require.Contains(t, ids, "interrupt-cancel")
 	require.Contains(t, ids, "interrupt-submit")
 	require.Contains(t, ids, "interrupt-actions")
+}
+
+func TestDeerflowTraceFromSessionDetailFallsBackToLatestEvent(t *testing.T) {
+	payload, err := json.Marshal(map[string]any{
+		"trace": agentplatform.DeerFlowTrace{
+			ThreadID:  "thread-live",
+			RunID:     "deer-run-live",
+			RunStatus: "running",
+			Title:     "Kimi vs GLM",
+			Messages: []agentplatform.DeerFlowTraceMessage{{
+				ID:      "msg-1",
+				Type:    "human",
+				Content: "compare kimi and glm",
+			}},
+		},
+	})
+	require.NoError(t, err)
+
+	detail := &agentplatform.SessionDetail{
+		Runs: []agentplatform.RunTrace{{
+			Snapshot: &agentplatform.RunSnapshot{
+				RunID:     "run-1",
+				RunStatus: "running",
+				ProviderData: map[string]any{
+					"deerflow_state_tail": "messages[1]",
+				},
+			},
+			Events: []agentplatform.RunEventRecord{{
+				EventType:   "deerflow_trace_updated",
+				PayloadJSON: string(payload),
+			}},
+		}},
+	}
+
+	trace := deerflowTraceFromSessionDetail(detail, detail.Runs[0].Snapshot)
+	require.NotNil(t, trace)
+	require.Equal(t, "thread-live", trace.ThreadID)
+	require.Equal(t, "deer-run-live", trace.RunID)
+	require.Equal(t, "running", trace.RunStatus)
+	require.Equal(t, "messages[1]", trace.StateTail)
+	require.Len(t, trace.Messages, 1)
+	require.Equal(t, "compare kimi and glm", trace.Messages[0].Content)
 }

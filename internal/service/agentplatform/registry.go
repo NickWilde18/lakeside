@@ -11,7 +11,9 @@ import (
 
 	"lakeside/internal/infra/ragclient"
 	"lakeside/internal/service/chatmodels"
+	"lakeside/internal/service/deerflowclient"
 	"lakeside/internal/service/domainassistant"
+	leafdeerflow "lakeside/internal/service/leafagent/deerflow"
 	leafitsm "lakeside/internal/service/leafagent/itsm"
 	leafknowledge "lakeside/internal/service/leafagent/knowledge"
 	"lakeside/internal/service/moduleapi"
@@ -36,6 +38,14 @@ func newRuntimeRegistry(ctx context.Context, cfg *config) (*runtimeRegistry, err
 	rag := ragclient.NewClient(ragclient.Config{
 		BaseURL: cfg.RAG.BaseURL,
 		Timeout: time.Duration(cfg.RAG.TimeoutMs) * time.Millisecond,
+	})
+	deerFlow := deerflowclient.New(deerflowclient.Config{
+		BaseURL:         cfg.DeerFlow.BaseURL,
+		AssistantID:     cfg.DeerFlow.AssistantID,
+		DefaultModel:    cfg.DeerFlow.DefaultModel,
+		Timeout:         time.Duration(cfg.DeerFlow.TimeoutMs) * time.Millisecond,
+		ThinkingEnabled: cfg.DeerFlow.ThinkingEnabled,
+		PlanMode:        cfg.DeerFlow.PlanMode,
 	})
 	chatModel := chatmodels.GetChatModel(ctx)
 
@@ -70,6 +80,17 @@ func newRuntimeRegistry(ctx context.Context, cfg *config) (*runtimeRegistry, err
 				Kind:          leaf.Type,
 				Interruptible: false,
 				Tool:          tool,
+				Agent:         agent,
+			}
+			infos[leaf.Key] = nodeInfo{Key: leaf.Key, Description: leaf.Description, Kind: leaf.Type}
+		case "deerflow":
+			agent := leafdeerflow.New(leaf.Key, leaf.Description, deerFlow)
+			leafAgents[leaf.Key] = agent
+			leafBindings[leaf.Key] = domainassistant.LeafBinding{
+				Key:           leaf.Key,
+				Description:   leaf.Description,
+				Kind:          leaf.Type,
+				Interruptible: false,
 				Agent:         agent,
 			}
 			infos[leaf.Key] = nodeInfo{Key: leaf.Key, Description: leaf.Description, Kind: leaf.Type}

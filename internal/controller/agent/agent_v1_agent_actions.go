@@ -230,7 +230,7 @@ func (c *ControllerV1) AgentActions(ctx context.Context, req *v1.AgentActionsReq
 
 func shouldRefreshActionSurface(eventType string) bool {
 	switch strings.TrimSpace(eventType) {
-	case "run_started", "itsm_interrupt_emitted", "run_waiting_input", "run_completed", "run_failed", "run_cancelled":
+	case "run_started", "itsm_interrupt_emitted", "run_waiting_input", "run_completed", "run_failed", "run_cancelled", "deerflow_trace_updated":
 		return true
 	default:
 		return false

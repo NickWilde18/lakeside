@@ -37,6 +37,9 @@ func (p *planner) Assess(ctx context.Context, userMessage string) (moduleapi.Ass
 	if p == nil {
 		return moduleapi.Assessment{}, fmt.Errorf("planner is nil")
 	}
+	if assessment, ok := p.singleLeafAssessment(userMessage); ok {
+		return p.normalizeAssessment(assessment), nil
+	}
 	if assessment, ok := p.assessByHeuristic(userMessage); ok {
 		return p.normalizeAssessment(assessment), nil
 	}
@@ -68,6 +71,9 @@ func (p *planner) Assess(ctx context.Context, userMessage string) (moduleapi.Ass
 func (p *planner) Plan(ctx context.Context, userMessage string) (domainExecutionPlan, error) {
 	if p == nil {
 		return domainExecutionPlan{}, fmt.Errorf("planner is nil")
+	}
+	if plan, ok := p.singleLeafPlan(userMessage); ok {
+		return p.normalizePlan(plan), nil
 	}
 	if plan, ok := p.planByHeuristic(userMessage); ok {
 		return p.normalizePlan(plan), nil
@@ -162,6 +168,33 @@ func (p *planner) assessByHeuristic(userMessage string) (moduleapi.Assessment, b
 	return moduleapi.Assessment{}, false
 }
 
+func (p *planner) singleLeafAssessment(userMessage string) (moduleapi.Assessment, bool) {
+	leaf, ok := p.singleExecutableLeaf()
+	if !ok {
+		return moduleapi.Assessment{}, false
+	}
+	msg := strings.ToLower(strings.TrimSpace(userMessage))
+	if msg == "" || p.looksVague(msg) {
+		return moduleapi.Assessment{
+			Status:         moduleapi.AssessmentNeedClarify,
+			Phase:          moduleapi.PhaseRead,
+			Score:          0.62,
+			Reason:         "single-leaf domain still needs a minimally specific request",
+			FollowUpPrompt: p.defaultClarifyPrompt(),
+		}, true
+	}
+	phase := moduleapi.PhaseRead
+	if leaf.Interruptible {
+		phase = moduleapi.PhaseWrite
+	}
+	return moduleapi.Assessment{
+		Status: moduleapi.AssessmentReady,
+		Phase:  phase,
+		Score:  0.91,
+		Reason: fmt.Sprintf("single-leaf domain routes directly to %s", strings.TrimSpace(leaf.Key)),
+	}, true
+}
+
 func (p *planner) planByHeuristic(userMessage string) (domainExecutionPlan, bool) {
 	msg := strings.ToLower(strings.TrimSpace(userMessage))
 	if msg == "" {
@@ -245,6 +278,24 @@ func (p *planner) planByHeuristic(userMessage string) (domainExecutionPlan, bool
 	return domainExecutionPlan{}, false
 }
 
+func (p *planner) singleLeafPlan(userMessage string) (domainExecutionPlan, bool) {
+	leaf, ok := p.singleExecutableLeaf()
+	if !ok {
+		return domainExecutionPlan{}, false
+	}
+	assessment, assessed := p.singleLeafAssessment(userMessage)
+	if !assessed || assessment.Status != moduleapi.AssessmentReady {
+		return domainExecutionPlan{}, false
+	}
+	return domainExecutionPlan{
+		Mode: planModeSequential,
+		Steps: []domainPlanStep{{
+			AgentKey: strings.TrimSpace(leaf.Key),
+			Reason:   "单叶子领域直接进入唯一执行能力",
+		}},
+	}, true
+}
+
 func (p *planner) preferredKnowledgeAgent(msg string) string {
 	if p == nil {
 		return ""
@@ -269,6 +320,9 @@ func (p *planner) preferredKnowledgeAgent(msg string) string {
 func (p *planner) fallbackExecutablePlan(userMessage string) (domainExecutionPlan, bool) {
 	if p == nil {
 		return domainExecutionPlan{}, false
+	}
+	if plan, ok := p.singleLeafPlan(userMessage); ok {
+		return plan, true
 	}
 	assessment, ok := p.assessByHeuristic(userMessage)
 	if !ok {
@@ -302,6 +356,17 @@ func (p *planner) fallbackExecutablePlan(userMessage string) (domainExecutionPla
 		}
 	}
 	return domainExecutionPlan{}, false
+}
+
+func (p *planner) singleExecutableLeaf() (LeafBinding, bool) {
+	if p == nil || len(p.leaves) != 1 {
+		return LeafBinding{}, false
+	}
+	leaf := p.leaves[0]
+	if strings.TrimSpace(leaf.Key) == "" {
+		return LeafBinding{}, false
+	}
+	return leaf, true
 }
 
 func (p *planner) planFallbackOrError(userMessage string, cause error) (domainExecutionPlan, error) {

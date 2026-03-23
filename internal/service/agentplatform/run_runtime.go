@@ -66,19 +66,23 @@ func (s *Service) executeQuery(ctx context.Context, req *executeQueryRequest) (*
 	if !ok || bundle == nil || bundle.Runner == nil {
 		return nil, errors.New("assistant runner not found")
 	}
+	sessionValues := g.Map{
+		"assistant_key":       req.AssistantKey,
+		"session_id":          req.SessionID,
+		"checkpoint_id":       req.CheckpointID,
+		"user_upn":            req.UserUPN,
+		"user_code":           req.UserUPN,
+		"assistant_context":   assistantContext,
+		"latest_user_message": req.Message,
+		"preferred_language":  req.Language,
+	}
+	for key, value := range s.buildProviderSessionValues(withoutCancel(ctx), req.SessionID) {
+		sessionValues[key] = value
+	}
 	g.Log().Infof(ctx, "agent run query started, assistant_key=%s run_id=%s session_id=%s checkpoint_id=%s", req.AssistantKey, req.RunID, req.SessionID, req.CheckpointID)
 	iter := bundle.Runner.Query(ctx, req.Message,
 		adk.WithCheckPointID(req.CheckpointID),
-		adk.WithSessionValues(g.Map{
-			"assistant_key":       req.AssistantKey,
-			"session_id":          req.SessionID,
-			"checkpoint_id":       req.CheckpointID,
-			"user_upn":            req.UserUPN,
-			"user_code":           req.UserUPN,
-			"assistant_context":   assistantContext,
-			"latest_user_message": req.Message,
-			"preferred_language":  req.Language,
-		}),
+		adk.WithSessionValues(sessionValues),
 		s.callbackOpt,
 	)
 	return s.consumeIterator(ctx, req.AssistantKey, iter, req.SessionID, req.CheckpointID, req.Language), nil
@@ -98,18 +102,22 @@ func (s *Service) executeResume(ctx context.Context, req *executeResumeRequest) 
 		return nil, err
 	}
 	latestMessage := summarizeTargets(req.Targets, req.Language)
+	sessionValues := g.Map{
+		"assistant_key":       req.AssistantKey,
+		"session_id":          req.SessionID,
+		"checkpoint_id":       req.CheckpointID,
+		"user_upn":            req.UserUPN,
+		"user_code":           req.UserUPN,
+		"assistant_context":   assistantContext,
+		"latest_user_message": latestMessage,
+		"preferred_language":  req.Language,
+	}
+	for key, value := range s.buildProviderSessionValues(withoutCancel(ctx), req.SessionID) {
+		sessionValues[key] = value
+	}
 	g.Log().Infof(ctx, "agent run resume started, assistant_key=%s run_id=%s session_id=%s checkpoint_id=%s target_count=%d", req.AssistantKey, req.RunID, req.SessionID, req.CheckpointID, len(resumeTargets))
 	iter, err := bundle.Runner.ResumeWithParams(ctx, req.CheckpointID, &adk.ResumeParams{Targets: resumeTargets},
-		adk.WithSessionValues(g.Map{
-			"assistant_key":       req.AssistantKey,
-			"session_id":          req.SessionID,
-			"checkpoint_id":       req.CheckpointID,
-			"user_upn":            req.UserUPN,
-			"user_code":           req.UserUPN,
-			"assistant_context":   assistantContext,
-			"latest_user_message": latestMessage,
-			"preferred_language":  req.Language,
-		}),
+		adk.WithSessionValues(sessionValues),
 		s.callbackOpt,
 	)
 	if err != nil {
@@ -313,6 +321,13 @@ func buildRunSnapshot(run *RunRecord) (*RunSnapshot, error) {
 	snapshot.Steps = append([]StepResult(nil), resp.Steps...)
 	snapshot.Interrupts = append([]itsmv1.AgentInterrupt(nil), resp.Interrupts...)
 	snapshot.Result = resp.Result
+	snapshot.DeerFlow = resp.DeerFlow
+	if len(resp.ProviderData) > 0 {
+		snapshot.ProviderData = make(map[string]any, len(resp.ProviderData))
+		for key, value := range resp.ProviderData {
+			snapshot.ProviderData[key] = value
+		}
+	}
 	if snapshot.AssistantKey == "" {
 		snapshot.AssistantKey = resp.AssistantKey
 	}

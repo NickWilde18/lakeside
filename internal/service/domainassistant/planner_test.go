@@ -8,6 +8,8 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/stretchr/testify/require"
+
+	"lakeside/internal/service/moduleapi"
 )
 
 type fakeToolCallingModel struct {
@@ -235,4 +237,43 @@ func TestPlannerPlanFallsBackToKnowledgeWhenModelGenerateFails(t *testing.T) {
 	require.Equal(t, planModeSequential, plan.Mode)
 	require.Len(t, plan.Steps, 1)
 	require.Equal(t, "campus_it_kb", plan.Steps[0].AgentKey)
+}
+
+func TestPlannerSingleLeafDomainRoutesDirectly(t *testing.T) {
+	p := &planner{
+		domainKey:   "deep_research",
+		description: "深度研究",
+		leaves: []LeafBinding{
+			{Key: "deerflow_research", Kind: "deerflow", Description: "深度研究执行器", Interruptible: false},
+		},
+	}
+
+	assessment, err := p.Assess(context.Background(), "帮我研究一下香港高校在 AI 教学上的公开实践，并整理成要点。")
+	require.NoError(t, err)
+	require.Equal(t, moduleapi.AssessmentReady, assessment.Status)
+	require.Equal(t, moduleapi.PhaseRead, assessment.Phase)
+
+	plan, err := p.Plan(context.Background(), "帮我研究一下香港高校在 AI 教学上的公开实践，并整理成要点。")
+	require.NoError(t, err)
+	require.Equal(t, planModeSequential, plan.Mode)
+	require.Len(t, plan.Steps, 1)
+	require.Equal(t, "deerflow_research", plan.Steps[0].AgentKey)
+}
+
+func TestPlannerSingleLeafDomainStillClarifiesVagueInput(t *testing.T) {
+	p := &planner{
+		domainKey:   "deep_research",
+		description: "深度研究",
+		leaves: []LeafBinding{
+			{Key: "deerflow_research", Kind: "deerflow", Description: "深度研究执行器", Interruptible: false},
+		},
+	}
+
+	assessment, err := p.Assess(context.Background(), "帮帮我")
+	require.NoError(t, err)
+	require.Equal(t, moduleapi.AssessmentNeedClarify, assessment.Status)
+
+	_, err = p.Plan(context.Background(), "帮帮我")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "planner")
 }

@@ -25,6 +25,8 @@ func buildAgentRunSnapshot(snapshot *agentplatform.RunSnapshot) v1.AgentRunSnaps
 		Steps:        buildAgentSteps(snapshot.Steps),
 		Interrupts:   append([]itsmv1.AgentInterrupt(nil), snapshot.Interrupts...),
 		Result:       buildAgentResult(snapshot.Result),
+		DeerFlow:     buildAgentDeerFlowTrace(snapshot.DeerFlow),
+		ProviderData: cloneProviderData(snapshot.ProviderData),
 		ErrorMessage: snapshot.ErrorMessage,
 		StartedAt:    formatTime(snapshot.StartedAt),
 		FinishedAt:   formatTime(snapshot.FinishedAt),
@@ -57,6 +59,76 @@ func buildAgentResult(result *agentplatform.Result) *v1.AgentResult {
 		Code:     result.Code,
 		Sources:  buildAgentSources(result.Sources),
 	}
+}
+
+func buildAgentDeerFlowTrace(trace *agentplatform.DeerFlowTrace) *v1.AgentDeerFlowTrace {
+	if trace == nil {
+		return nil
+	}
+	result := &v1.AgentDeerFlowTrace{
+		ThreadID:  trace.ThreadID,
+		RunID:     trace.RunID,
+		RunStatus: trace.RunStatus,
+		Title:     trace.Title,
+		StateTail: trace.StateTail,
+		Artifacts: append([]string(nil), trace.Artifacts...),
+		Messages:  make([]v1.AgentDeerFlowTraceMessage, 0, len(trace.Messages)),
+		Todos:     make([]v1.AgentDeerFlowTraceTodo, 0, len(trace.Todos)),
+		Sources:   buildAgentDeerFlowSources(trace.Sources),
+	}
+	for _, message := range trace.Messages {
+		toolCalls := make([]v1.AgentDeerFlowTraceToolCall, 0, len(message.ToolCalls))
+		for _, call := range message.ToolCalls {
+			toolCalls = append(toolCalls, v1.AgentDeerFlowTraceToolCall{
+				ID:      call.ID,
+				Name:    call.Name,
+				Args:    cloneProviderData(call.Args),
+				Result:  call.Result,
+				Status:  call.Status,
+				Error:   call.Error,
+				Sources: buildAgentDeerFlowSources(call.Sources),
+			})
+		}
+		result.Messages = append(result.Messages, v1.AgentDeerFlowTraceMessage{
+			ID:         message.ID,
+			Type:       message.Type,
+			Name:       message.Name,
+			Content:    message.Content,
+			Reasoning:  message.Reasoning,
+			ToolCallID: message.ToolCallID,
+			ToolCalls:  toolCalls,
+			Status:     message.Status,
+		})
+	}
+	for _, todo := range trace.Todos {
+		result.Todos = append(result.Todos, v1.AgentDeerFlowTraceTodo{
+			Content: todo.Content,
+			Status:  todo.Status,
+		})
+	}
+	return result
+}
+
+func buildAgentDeerFlowSources(items []agentplatform.DeerFlowTraceSource) []v1.AgentDeerFlowTraceSource {
+	if len(items) == 0 {
+		return nil
+	}
+	result := make([]v1.AgentDeerFlowTraceSource, 0, len(items))
+	for _, item := range items {
+		result = append(result, v1.AgentDeerFlowTraceSource{
+			Title:         item.Title,
+			URL:           item.URL,
+			Domain:        item.Domain,
+			Snippet:       item.Snippet,
+			Query:         item.Query,
+			ToolName:      item.ToolName,
+			ToolCallID:    item.ToolCallID,
+			SourceType:    item.SourceType,
+			Quality:       item.Quality,
+			LowConfidence: item.LowConfidence,
+		})
+	}
+	return result
 }
 
 func buildAgentSources(sources []agentplatform.Source) []v1.AgentSource {
@@ -172,6 +244,17 @@ func parsePayload(raw string) any {
 		return raw
 	}
 	return out
+}
+
+func cloneProviderData(source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return nil
+	}
+	cloned := make(map[string]any, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func parsePath(raw string) []string {

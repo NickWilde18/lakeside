@@ -42,6 +42,7 @@ const (
 	eventTypeKnowledgeAnswerReady   = "knowledge_answer_ready"
 	eventTypeITSMInterruptEmitted   = "itsm_interrupt_emitted"
 	eventTypeITSMDone               = "itsm_done"
+	eventTypeDeerFlowTraceUpdated   = "deerflow_trace_updated"
 )
 
 const (
@@ -196,6 +197,8 @@ type Response struct {
 	Steps        []StepResult
 	Interrupts   []itsmv1.AgentInterrupt
 	Result       *Result
+	DeerFlow     *DeerFlowTrace
+	ProviderData map[string]any `json:"provider_data,omitempty"`
 }
 
 type RunSnapshot struct {
@@ -209,6 +212,8 @@ type RunSnapshot struct {
 	Steps        []StepResult
 	Interrupts   []itsmv1.AgentInterrupt
 	Result       *Result
+	DeerFlow     *DeerFlowTrace
+	ProviderData map[string]any `json:"provider_data,omitempty"`
 	ErrorMessage string
 	StartedAt    time.Time
 	FinishedAt   time.Time
@@ -387,6 +392,14 @@ type config struct {
 		MaxItems  int
 		Workers   int
 		QueueSize int
+	}
+	DeerFlow struct {
+		BaseURL         string
+		AssistantID     string
+		TimeoutMs       int
+		DefaultModel    string
+		ThinkingEnabled bool
+		PlanMode        bool
 	}
 	RAG struct {
 		BaseURL     string

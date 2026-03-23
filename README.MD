@@ -1,6 +1,6 @@
 # Lakeside
 
-Lakeside 是一个面向校园场景的分层 Agent 平台。当前主产品实例是 `campus`，它采用 **顶层助手 -> 领域助手 -> 叶子能力** 的结构，把知识问答、排障建议和正式 ITSM 工单流程统一到同一个会话模型里。
+Lakeside 是一个面向校园场景的分层 Agent 平台。当前主产品实例包括 `campus` 与 `research`：前者采用 **顶层助手 -> 领域助手 -> 叶子能力** 的结构，把知识问答、排障建议和正式 ITSM 工单流程统一到同一个会话模型里；后者把开放式深度研究任务路由到 DeerFlow 执行。
 
 前端主产品协议已经切到 **session-first + server-driven UI**：
 
@@ -18,9 +18,12 @@ Lakeside 是一个面向校园场景的分层 Agent 平台。当前主产品实�
 | 层级 | Key | 职责 | 当前状态 |
 | --- | --- | --- | --- |
 | Root | `campus` | 顶层总控，做模块 assessment、route plan、fan-out 与结果合并 | 已启用 |
+| Root | `research` | 深度研究顶层入口，把任务路由到 `deep_research` 领域 | 已启用 |
 | Domain | `it` | 校园 IT 领域编排，执行 `assessment + planner + workflow` | 已启用 |
+| Domain | `deep_research` | 深度研究领域编排，负责把任务交给 DeerFlow 执行 | 已启用 |
 | Leaf | `campus_it_kb` | 面向普通师生的校园 IT 知识检索 tool，通过外部 RAG 服务回答 | 已启用 |
 | Leaf | `itsm` | 正式 IT 支持流程，支持补信息、确认、提单 | 已启用 |
+| Leaf | `deerflow_research` | 调用 DeerFlow 深度研究引擎，处理开放式研究、资料整理和长报告生成 | 已启用 |
 | Leaf | `campus_it_kb_for_itso_student_assistant` | ITSO 学生助理内部知识 | 预留，当前配置未启用 |
 
 ## Campus 架构图
@@ -187,6 +190,32 @@ sequenceDiagram
 - `beginRendering`
 
 后端只驱动**中间聊天区**；页面壳子、历史会话列表仍由前端渲染。
+
+### Research / DeerFlow 聊天面语义
+
+`research -> deep_research -> deerflow_research` 这条链路仍然复用同一套 `render/actions` NDJSON 协议，但聊天区会额外携带 DeerFlow 轨迹数据：
+
+- `dataModel.deerflow.traceJson`：序列化后的 DeerFlow trace
+- trace 里包含 `thread_id`、`run_id`、`run_status`、`title`
+- trace 里包含 DeerFlow `messages`、`todos`、`sources`、`artifacts`
+- source 会被归类为 `official / benchmark / provider / media / community / unknown`
+- source 会被标成 `high / medium / low` 可信度，并暴露 `low_confidence`
+
+前端 research 页在检测到 `deerflow.traceJson` 后，会切换到 DeerFlow 专用 renderer，而不是继续使用通用消息泡泡。这个 renderer 会展示：
+
+- 研究计划 / todo
+- 处理中步骤（thinking、tool call、搜索结果、子任务、文件输出）
+- 资料来源及其可信度标签
+- 质量告警，例如低可信来源、工具失败、尾部状态诊断
+
+会话详情或 render 刷新时，如果 snapshot 里尚未固化 DeerFlow trace，后端会从最新 `deerflow_trace_updated` 事件回填 trace，保证 research 会话恢复后仍能复原 DeerFlow 原生过程视图。
+
+另外，若 DeerFlow 终态没有可见文本，Lakeside 不再把它当成“完成但空白”，而是会把 run 显式标成 `failed`，并回填：
+
+- `thread_id`
+- `run_id`
+- `run_status`
+- `state_tail`
 
 ### 当前动作名
 
@@ -413,3 +442,5 @@ go run main.go
 ```bash
 go test ./...
 ```
+
+research / DeerFlow 的联调与手工验证步骤见 [TESTING.md](./TESTING.md)。

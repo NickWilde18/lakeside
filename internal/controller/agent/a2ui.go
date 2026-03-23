@@ -65,6 +65,7 @@ type agentRuntimeOverlay struct {
 	DraftContent     string
 	DraftStatus      string
 	PendingInterrupt *itsmv1.AgentInterrupt
+	DeerFlowTrace    *agentplatform.DeerFlowTrace
 	TraceEvents      []agentplatform.RunEventRecord
 }
 
@@ -84,6 +85,7 @@ type agentPageState struct {
 	DraftContent         string
 	DraftSubject         string
 	DraftOthersDesc      string
+	DeerFlowTrace        *agentplatform.DeerFlowTrace
 }
 
 type agentPageMessage struct {
@@ -106,6 +108,12 @@ func assistantMeta(assistantKey string) agentAssistantMeta {
 		return agentAssistantMeta{
 			Title:          "校园助理",
 			Description:    "回答校园知识问题，并在需要时协助发起 ITSM 工单流程。",
+			BackendEnabled: true,
+		}
+	case "research":
+		return agentAssistantMeta{
+			Title:          "深度研究",
+			Description:    "连接 DeerFlow 深度研究引擎，适合开放式调研、资料整理和长报告生成。",
 			BackendEnabled: true,
 		}
 	case "mail":
@@ -189,6 +197,7 @@ func buildAgentPageState(ctx context.Context, svc *agentplatform.Service, assist
 			state.RunStatus = strings.TrimSpace(runtime.DraftStatus)
 			state.DraftContent = runtime.DraftContent
 			state.PendingInterrupt = runtime.PendingInterrupt
+			state.DeerFlowTrace = runtime.DeerFlowTrace
 		}
 		if isComposerBlockedStatus(state.RunStatus) {
 			state.ComposerEnabled = false
@@ -208,6 +217,7 @@ func buildAgentPageState(ctx context.Context, svc *agentplatform.Service, assist
 	if latestSnapshot != nil {
 		state.CurrentRunID = latestSnapshot.RunID
 		state.RunStatus = latestSnapshot.RunStatus
+		state.DeerFlowTrace = deerflowTraceFromSessionDetail(detail, latestSnapshot)
 		if latestSnapshot.RunStatus == "waiting_input" && len(latestSnapshot.Interrupts) > 0 {
 			interrupt := latestSnapshot.Interrupts[0]
 			state.PendingInterrupt = &interrupt
@@ -229,6 +239,9 @@ func buildAgentPageState(ctx context.Context, svc *agentplatform.Service, assist
 		}
 		if runtime.PendingInterrupt != nil {
 			state.PendingInterrupt = runtime.PendingInterrupt
+		}
+		if runtime.DeerFlowTrace != nil {
+			state.DeerFlowTrace = runtime.DeerFlowTrace
 		}
 		if runtime.DraftContent != "" || state.RunStatus == "running" || state.RunStatus == "queued" {
 			state.DraftContent = runtime.DraftContent
@@ -415,6 +428,9 @@ func buildAgentPageSurface(state agentPageState) ([]a2uiComponent, []a2uiDataCon
 			stringContent("answer", ""),
 			stringContent("subject", state.DraftSubject),
 			stringContent("othersDesc", state.DraftOthersDesc),
+		),
+		mapContent("deerflow",
+			stringContent("traceJson", marshalJSONString(state.DeerFlowTrace)),
 		),
 	}
 
@@ -899,6 +915,17 @@ func onRuntimeEvent(runtime *agentRuntimeOverlay, w io.Writer, traceEnabled bool
 					}
 				}
 			}
+		case "deerflow_trace_updated":
+			payload := parsePayload(event.PayloadJSON)
+			if mapped, ok := payload.(map[string]any); ok {
+				if rawTrace, exists := mapped["trace"]; exists {
+					data, _ := json.Marshal(rawTrace)
+					var trace agentplatform.DeerFlowTrace
+					if err := json.Unmarshal(data, &trace); err == nil {
+						runtime.DeerFlowTrace = &trace
+					}
+				}
+			}
 		default:
 			if strings.TrimSpace(event.EventType) == "run_started" {
 				runtime.DraftStatus = "running"
@@ -916,4 +943,154 @@ func snapshotResultSources(snapshot *agentplatform.RunSnapshot) []agentplatform.
 		return nil
 	}
 	return snapshot.Result.Sources
+}
+
+func deerflowTraceFromSnapshot(snapshot *agentplatform.RunSnapshot) *agentplatform.DeerFlowTrace {
+	if snapshot == nil {
+		return nil
+	}
+	if snapshot.DeerFlow != nil {
+		return snapshot.DeerFlow
+	}
+	threadID := providerDataString(snapshot.ProviderData, "deerflow_thread_id")
+	runID := providerDataString(snapshot.ProviderData, "deerflow_run_id")
+	runStatus := providerDataString(snapshot.ProviderData, "deerflow_run_status")
+	stateTail := providerDataString(snapshot.ProviderData, "deerflow_state_tail")
+	if threadID == "" && runID == "" && runStatus == "" && stateTail == "" {
+		return nil
+	}
+	return &agentplatform.DeerFlowTrace{
+		ThreadID:  threadID,
+		RunID:     firstNonEmpty(runID, snapshot.RunID),
+		RunStatus: firstNonEmpty(runStatus, snapshot.RunStatus),
+		StateTail: stateTail,
+	}
+}
+
+func deerflowTraceFromSessionDetail(detail *agentplatform.SessionDetail, latestSnapshot *agentplatform.RunSnapshot) *agentplatform.DeerFlowTrace {
+	if detail == nil {
+		return deerflowTraceFromSnapshot(latestSnapshot)
+	}
+	latestRunID := ""
+	if latestSnapshot != nil {
+		latestRunID = strings.TrimSpace(latestSnapshot.RunID)
+	}
+	if latestRunID != "" {
+		for index := len(detail.Runs) - 1; index >= 0; index-- {
+			trace := detail.Runs[index]
+			if trace.Snapshot == nil || strings.TrimSpace(trace.Snapshot.RunID) != latestRunID {
+				continue
+			}
+			if merged := deerflowTraceFromRunTrace(trace); merged != nil {
+				return merged
+			}
+			break
+		}
+	}
+	if fallback := deerflowTraceFromSnapshot(latestSnapshot); fallback != nil {
+		return fallback
+	}
+	for index := len(detail.Runs) - 1; index >= 0; index-- {
+		if merged := deerflowTraceFromRunTrace(detail.Runs[index]); merged != nil {
+			return merged
+		}
+	}
+	return nil
+}
+
+func deerflowTraceFromRunTrace(trace agentplatform.RunTrace) *agentplatform.DeerFlowTrace {
+	base := deerflowTraceFromSnapshot(trace.Snapshot)
+	latestEventTrace := deerflowTraceFromEvents(trace.Events)
+	return mergeDeerFlowTrace(latestEventTrace, base)
+}
+
+func deerflowTraceFromEvents(events []agentplatform.RunEventRecord) *agentplatform.DeerFlowTrace {
+	for index := len(events) - 1; index >= 0; index-- {
+		eventTrace := deerflowTraceFromEvent(events[index])
+		if eventTrace != nil {
+			return eventTrace
+		}
+	}
+	return nil
+}
+
+func deerflowTraceFromEvent(event agentplatform.RunEventRecord) *agentplatform.DeerFlowTrace {
+	if strings.TrimSpace(event.EventType) != "deerflow_trace_updated" {
+		return nil
+	}
+	payload := parsePayload(event.PayloadJSON)
+	mapped, ok := payload.(map[string]any)
+	if !ok {
+		return nil
+	}
+	rawTrace, exists := mapped["trace"]
+	if !exists {
+		return nil
+	}
+	data, err := json.Marshal(rawTrace)
+	if err != nil {
+		return nil
+	}
+	var trace agentplatform.DeerFlowTrace
+	if err := json.Unmarshal(data, &trace); err != nil {
+		return nil
+	}
+	return &trace
+}
+
+func mergeDeerFlowTrace(primary, fallback *agentplatform.DeerFlowTrace) *agentplatform.DeerFlowTrace {
+	if primary == nil {
+		return fallback
+	}
+	if fallback == nil {
+		return primary
+	}
+	merged := *primary
+	merged.ThreadID = firstNonEmpty(merged.ThreadID, fallback.ThreadID)
+	merged.RunID = firstNonEmpty(merged.RunID, fallback.RunID)
+	merged.RunStatus = firstNonEmpty(merged.RunStatus, fallback.RunStatus)
+	merged.Title = firstNonEmpty(merged.Title, fallback.Title)
+	merged.StateTail = firstNonEmpty(merged.StateTail, fallback.StateTail)
+	if len(merged.Messages) == 0 && len(fallback.Messages) > 0 {
+		merged.Messages = append([]agentplatform.DeerFlowTraceMessage(nil), fallback.Messages...)
+	}
+	if len(merged.Todos) == 0 && len(fallback.Todos) > 0 {
+		merged.Todos = append([]agentplatform.DeerFlowTraceTodo(nil), fallback.Todos...)
+	}
+	if len(merged.Artifacts) == 0 && len(fallback.Artifacts) > 0 {
+		merged.Artifacts = append([]string(nil), fallback.Artifacts...)
+	}
+	if len(merged.Sources) == 0 && len(fallback.Sources) > 0 {
+		merged.Sources = append([]agentplatform.DeerFlowTraceSource(nil), fallback.Sources...)
+	}
+	return &merged
+}
+
+func providerDataString(data map[string]any, key string) string {
+	if len(data) == 0 {
+		return ""
+	}
+	value, ok := data[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprintf("%v", value))
+}
+
+func marshalJSONString(value any) string {
+	if value == nil {
+		return ""
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func firstNonEmpty(primary, fallback string) string {
+	if strings.TrimSpace(primary) != "" {
+		return strings.TrimSpace(primary)
+	}
+	return strings.TrimSpace(fallback)
 }

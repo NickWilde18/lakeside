@@ -125,6 +125,21 @@ agents:
     # 长期记忆任务队列长度。
     queueSize: 32
 
+  deerflow:
+    # DeerFlow LangGraph API 根路径。Lakeside 通过它创建 thread 并执行 deep research run。
+    # 如果你前面有反向代理，也应填写 /api/langgraph 这层路径，而不是 DeerFlow 前端首页。
+    baseURL: "http://127.0.0.1:2026/api/langgraph"
+    # DeerFlow assistant_id。默认可用 lead_agent。
+    assistantID: "lead_agent"
+    # DeerFlow wait 接口超时，单位毫秒。
+    timeoutMs: 300000
+    # 可选：覆盖 DeerFlow 默认模型。
+    defaultModel: ""
+    # 是否开启 DeerFlow thinking mode。
+    thinkingEnabled: false
+    # 是否启用 DeerFlow plan mode。
+    planMode: true
+
   rag:
     # 独立 RAG 服务 HTTP 地址。Lakeside 只接入 retrieve / batch_get，不负责知识库管理。
     baseURL: "http://127.0.0.1:8080"
@@ -170,6 +185,26 @@ agents:
         - 对于已经能明确归类为 it 的问题，应交给 it 领域助手处理。
         - 始终使用用户当前的语言回答。
         - 不要伪造学校政策、系统状态、工单结果或知识来源。
+
+    - key: "research"
+      description: "深度研究顶层入口，负责把研究任务路由到 deep research 领域。"
+      maxIterations: 4
+      children:
+        - "deep_research"
+      instructionTemplate: |
+        你是深度研究助手的顶层总控。
+        当前登录用户 UPN：{user_upn}
+        系统已知背景与长期记忆如下：
+        {assistant_context}
+
+        你当前可调用的下级助手如下：
+        {child_catalog}
+
+        工作规则：
+        - 你只负责把研究型请求交给下级领域助手，不直接执行具体检索或代码操作。
+        - 当前版本只接入 {child_catalog} 中列出的领域助手。
+        - 如果用户请求太模糊，先追问一个最小澄清问题。
+        - 始终使用用户当前的语言回答。
 
   domains:
     # 领域助手。当前先实现 it；hr、osa 等后续按同样结构接入。
@@ -217,8 +252,28 @@ agents:
         - 如果证据不足，不要编造；直接说明当前没有足够依据。
         - 始终使用用户当前的语言回答。
 
+    - key: "deep_research"
+      description: "深度研究领域助手，负责把开放式研究任务交给 DeerFlow 执行。"
+      maxIterations: 4
+      children:
+        - "deerflow_research"
+      instructionTemplate: |
+        你是深度研究领域助手。
+        当前登录用户 UPN：{user_upn}
+        系统已知背景与长期记忆如下：
+        {assistant_context}
+
+        你当前可调用的叶子 agent 如下：
+        {child_catalog}
+
+        工作规则：
+        - 当前领域只有一个 DeerFlow 研究执行能力。
+        - 对于有明确主题、目标或范围的研究任务，直接调用该叶子能力。
+        - 如果用户只说“帮我研究一下”但没有主题，请先追问一个最小澄清问题。
+        - 始终使用用户当前的语言回答。
+
   leaves:
-    # 叶子 agent 只做一件明确的事。当前支持 itsm / knowledge 两种类型。
+    # 叶子 agent 只做一件明确的事。当前支持 itsm / knowledge / deerflow 三种类型。
     - key: "itsm"
       type: "itsm"
       description: "处理中断型正式 IT 支持流程：报障、账号权限异常、网络/邮箱/系统故障、投诉反馈、工单提交与中断恢复。这个 agent 可能要求用户补充信息或确认；它不是优先用来回答“怎么办、如何排查、为什么失败、安装指引是什么”的。"
@@ -244,6 +299,10 @@ agents:
       rewriteQueries: 3
       maxContextDocs: 4
       sourceLimit: 4
+
+    - key: "deerflow_research"
+      type: "deerflow"
+      description: "调用 DeerFlow 深度研究引擎，处理开放式研究、资料整理、长报告生成和多步探索任务。"
 
 itsm:
   # 下游 ITSM 接口地址。

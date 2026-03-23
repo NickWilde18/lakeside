@@ -105,6 +105,7 @@ type agentsConfig struct {
 	Checkpoint    agentsCheckpointConfig    `json:"checkpoint" v:"required"`
 	Summarization agentsSummarizationConfig `json:"summarization" v:"required"`
 	Memory        agentsMemoryConfig        `json:"memory" v:"required"`
+	DeerFlow      agentsDeerFlowConfig      `json:"deerflow"`
 	RAG           agentsRAGConfig           `json:"rag"`
 	Roots         []agentsSupervisorConfig  `json:"roots" v:"required"`
 	Domains       []agentsSupervisorConfig  `json:"domains" v:"required"`
@@ -155,6 +156,15 @@ type agentsMemoryConfig struct {
 	MaxItems  int `json:"maxItems" v:"required|min:1|max:1000#agents.memory.maxItems 不能为空|agents.memory.maxItems 至少为 1|agents.memory.maxItems 不能超过 1000"`
 	Workers   int `json:"workers" v:"required|min:1|max:32#agents.memory.workers 不能为空|agents.memory.workers 至少为 1|agents.memory.workers 不能超过 32"`
 	QueueSize int `json:"queueSize" v:"required|min:1|max:5000#agents.memory.queueSize 不能为空|agents.memory.queueSize 至少为 1|agents.memory.queueSize 不能超过 5000"`
+}
+
+type agentsDeerFlowConfig struct {
+	BaseURL         string `json:"baseURL"`
+	AssistantID     string `json:"assistantID"`
+	TimeoutMs       int    `json:"timeoutMs"`
+	DefaultModel    string `json:"defaultModel"`
+	ThinkingEnabled bool   `json:"thinkingEnabled"`
+	PlanMode        bool   `json:"planMode"`
 }
 
 type agentsRAGConfig struct {
@@ -324,6 +334,7 @@ func validateAgentTree(ctx context.Context, config *Config) {
 	leafKeys := make(map[string]struct{}, len(config.Agents.Leaves))
 	allKeys := make(map[string]struct{}, len(config.Agents.Roots)+len(config.Agents.Domains)+len(config.Agents.Leaves))
 	hasKnowledgeLeaf := false
+	hasDeerFlowLeaf := false
 
 	for i, item := range config.Agents.Roots {
 		validateSupervisorNode(ctx, fmt.Sprintf("agents.roots[%d]", i), item)
@@ -339,6 +350,9 @@ func validateAgentTree(ctx context.Context, config *Config) {
 		if strings.EqualFold(strings.TrimSpace(item.Type), "knowledge") {
 			hasKnowledgeLeaf = true
 		}
+		if strings.EqualFold(strings.TrimSpace(item.Type), "deerflow") {
+			hasDeerFlowLeaf = true
+		}
 	}
 
 	if hasKnowledgeLeaf {
@@ -353,6 +367,19 @@ func validateAgentTree(ctx context.Context, config *Config) {
 		}
 		if config.Agents.RAG.DefaultTopK < 1 || config.Agents.RAG.DefaultTopK > 50 {
 			g.Log().Fatal(ctx, "配置文件校验失败: agents.rag.defaultTopK 必须在 1~50 之间")
+		}
+	}
+	if hasDeerFlowLeaf {
+		if strings.TrimSpace(config.Agents.DeerFlow.BaseURL) == "" {
+			g.Log().Fatal(ctx, "配置文件校验失败: 存在 deerflow 叶子 agent 时，agents.deerflow.baseURL 不能为空")
+		}
+		if !strings.HasPrefix(strings.TrimSpace(config.Agents.DeerFlow.BaseURL), "http://") &&
+			!strings.HasPrefix(strings.TrimSpace(config.Agents.DeerFlow.BaseURL), "https://") {
+			g.Log().Fatal(ctx, "配置文件校验失败: agents.deerflow.baseURL 必须是合法 URL")
+		}
+		if config.Agents.DeerFlow.TimeoutMs != 0 &&
+			(config.Agents.DeerFlow.TimeoutMs < 100 || config.Agents.DeerFlow.TimeoutMs > 300000) {
+			g.Log().Fatal(ctx, "配置文件校验失败: agents.deerflow.timeoutMs 必须在 100~300000 之间")
 		}
 	}
 
@@ -406,6 +433,7 @@ func validateLeafNode(ctx context.Context, path string, item agentsLeafConfig) {
 	}
 	switch strings.ToLower(strings.TrimSpace(item.Type)) {
 	case "itsm":
+	case "deerflow":
 	case "knowledge":
 		if len(item.KBIDs) == 0 {
 			g.Log().Fatalf(ctx, "配置文件校验失败: %s.kbIDs 至少需要一个 kb_id", path)
@@ -431,7 +459,7 @@ func validateLeafNode(ctx context.Context, path string, item agentsLeafConfig) {
 			g.Log().Fatalf(ctx, "配置文件校验失败: %s.sourceLimit 不能大于 maxContextDocs", path)
 		}
 	default:
-		g.Log().Fatalf(ctx, "配置文件校验失败: %s.type 仅支持 itsm/knowledge，当前值=%q", path, item.Type)
+		g.Log().Fatalf(ctx, "配置文件校验失败: %s.type 仅支持 itsm/knowledge/deerflow，当前值=%q", path, item.Type)
 	}
 }
 

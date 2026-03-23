@@ -3,6 +3,7 @@ package agentplatform
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -12,8 +13,10 @@ import (
 
 	itsmv1 "lakeside/api/itsm/v1"
 	"lakeside/internal/service/agentplatform/eventctx"
+	"lakeside/internal/service/deerflowclient"
 	legacyitsm "lakeside/internal/service/itsmagent"
 	legacyknowledge "lakeside/internal/service/knowledgeagent"
+	leafdeerflow "lakeside/internal/service/leafagent/deerflow"
 )
 
 func (s *Service) consumeIterator(ctx context.Context, assistantKey string, iter *adk.AsyncIterator[*adk.AgentEvent], sessionID, checkpointID, language string) *Response {
@@ -44,7 +47,13 @@ func (s *Service) consumeIterator(ctx context.Context, assistantKey string, iter
 		}
 		if event.Err != nil {
 			g.Log().Errorf(ctx, "agentplatform event failed, assistant_key=%s session_id=%s checkpoint_id=%s err=%v", assistantKey, sessionID, checkpointID, event.Err)
-			return s.errorResponse(assistantKey, sessionID, s.resolveNodePath(assistantKey, path, strings.TrimSpace(event.AgentName)), event.Err.Error())
+			return s.errorResponseWithProviderData(
+				assistantKey,
+				sessionID,
+				s.resolveNodePath(assistantKey, path, strings.TrimSpace(event.AgentName)),
+				event.Err.Error(),
+				deerflowProviderDataFromError(event.Err),
+			)
 		}
 		if event.Output != nil && event.Output.CustomizedOutput != nil {
 			if result := legacyknowledge.ResultFromAny(event.Output.CustomizedOutput); result != nil {
@@ -87,6 +96,27 @@ func (s *Service) consumeIterator(ctx context.Context, assistantKey string, iter
 					"ticket_no": result.TicketNo,
 					"code":      result.Code,
 					"success":   result.Success,
+				})
+			}
+			if result := leafdeerflow.ResultFromAny(event.Output.CustomizedOutput); result != nil {
+				stepPath := s.resolveNodePath(assistantKey, path, result.AgentName, strings.TrimSpace(event.AgentName))
+				step := StepResult{
+					Path:    stepPath,
+					Kind:    stepKindAssistantAnswer,
+					Message: result.Message,
+				}
+				resp.Steps = append(resp.Steps, step)
+				resp.ActivePath = step.Path
+				lastPath = preferLongerPath(lastPath, stepPath)
+				resp.DeerFlow = deerflowTraceFromClient(result.Trace)
+				ensureResponseProviderData(resp)["deerflow_thread_id"] = strings.TrimSpace(result.ThreadID)
+				if len(result.Artifacts) > 0 {
+					ensureResponseProviderData(resp)["deerflow_artifacts"] = append([]string(nil), result.Artifacts...)
+				}
+				eventctx.Emit(ctx, eventTypeAgentCompleted, step.Path, step.Message, g.Map{
+					"agent_name": strings.TrimSpace(result.AgentName),
+					"agent_type": "DeerFlowAgent",
+					"artifacts":  append([]string(nil), result.Artifacts...),
 				})
 			}
 		}
@@ -172,6 +202,16 @@ func (s *Service) consumeIterator(ctx context.Context, assistantKey string, iter
 	return resp
 }
 
+func ensureResponseProviderData(resp *Response) map[string]any {
+	if resp == nil {
+		return map[string]any{}
+	}
+	if resp.ProviderData == nil {
+		resp.ProviderData = make(map[string]any)
+	}
+	return resp.ProviderData
+}
+
 func resultFromKnowledge(result *legacyknowledge.Result) *Result {
 	if result == nil {
 		return nil
@@ -188,6 +228,14 @@ func resultFromKnowledge(result *legacyknowledge.Result) *Result {
 		})
 	}
 	return &Result{Success: result.Success, Message: result.Message, Sources: sources}
+}
+
+func deerflowProviderDataFromError(err error) map[string]any {
+	var diag *deerflowclient.RunDiagnosticError
+	if !errors.As(err, &diag) || diag == nil {
+		return nil
+	}
+	return diag.ProviderData()
 }
 
 func emitSyntheticAgentCompleted(ctx context.Context, path []string, agentName, agentType string) {
